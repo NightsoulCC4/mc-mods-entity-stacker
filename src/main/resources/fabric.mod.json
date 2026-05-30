@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "entitystacker",
+  "version": "${version}",
+  "name": "Entity Stacker",
+  "description": "Merges identical nearby passive/hostile mobs into a single counted stack, with stacked combat drops and breeding-aware unstacking.",
+  "authors": [
+    "YourName"
+  ],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.example.entitystacker.EntityStackerMod"
+    ]
+  },
+  "mixins": [
+    "entitystacker.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.2",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
