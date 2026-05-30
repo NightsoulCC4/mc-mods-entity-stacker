@@ -5,7 +5,7 @@
   "name": "Entity Stacker",
   "description": "Merges identical nearby passive/hostile mobs into a single counted stack, with stacked combat drops and breeding-aware unstacking.",
   "authors": [
-    "YourName"
+    "StickyCoffee"
   ],
   "license": "MIT",
   "environment": "*",

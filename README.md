@@ -1,8 +1,9 @@
 # Entity Stacker (Fabric · Minecraft 26.1.2)
 
 Merges identical nearby passive/hostile mobs into a single counted entity, shows the count above the
-head (`Cow x5`), decrements (instead of one‑shotting the whole pile) on death with proper loot, and
-unstacks one parent per successful breed while respecting the breeding cooldown.
+head (`Cow x5`), decrements (instead of one‑shotting the whole pile) on death with proper loot, unstacks one parent per
+successful breed while respecting the breeding cooldown, and hands out one pet per successful tame
+instead of taming the whole stack.
 
 ## Toolchain (from <https://fabricmc.net/develop> + the official `fabric-example-mod`)
 
@@ -62,6 +63,7 @@ Then:
 | Merge (instant)      | `ServerEntityEvents.ENTITY_LOAD` fast‑path                                  |
 | Combat / drops       | `ServerLivingEntityEvents.ALLOW_DEATH` → decrement + `dropAllDeathLoot(...)`|
 | Breeding             | Mixin on `Animal#setInLove(...)` → split one in-love single off the stack    |
+| Taming               | Mixin on `TamableAnimal#tame(...)` → tame one off the stack, leave the rest   |
 
 ### Forge → Fabric event mapping
 
@@ -82,6 +84,10 @@ See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggl
   itself doesn't enter love), so it takes two feeds — same cost as vanilla — to make a baby. The
   split-off singles go on the normal cooldown and re-merge into the stack once it expires; no adult is
   lost. See `StackEventHandler.splitOneForBreeding`.
+- **Taming hands out one pet per tame:** taming a stacked wolf/cat/parrot tames the interacted entity
+  as a single pet (keeping its own variant, collar, sit pose and owner) and leaves the rest behind as a
+  separate untamed stack. The leftover stack is a freshly created entity, so it reverts to the default
+  variant; the kept *pet* keeps the original's appearance. See `StackEventHandler.splitOffRemainderBeforeTame`.
 - **Variant‑blind merging:** stacks are keyed by entity *type* only. Add a variant comparison in
   `StackEventHandler.compatible(...)` to keep e.g. differently‑coloured sheep separate.
 - A despawning stack takes all its units with it (no spill).
@@ -89,6 +95,19 @@ See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggl
 ## Changelog
 
 Newest first. Dates are commit dates.
+
+### 2026-05-31 — Fix taming a stacked animal taming the whole stack
+
+- **Bug:** taming a stacked wolf/cat/parrot could tame the entire stack at once and leave a stray
+  single behind. `splitOffRemainderBeforeTame` added the leftover to the world while both it and the
+  interacted entity were still *untamed* same-type animals sitting on the same block — so the merge
+  pass (which runs effectively synchronously) immediately fused them back into one stack, which vanilla
+  then tamed whole. This is the same merge-back hazard the breeding split documents.
+- **Fix:** tame `self` (the interacted entity) *before* the leftover joins the world. A tamed animal
+  fails `isStackable()`/`canMerge()`, so the leftover has nothing to merge into and the result is a
+  deterministic one pet + one `(count-1)` untamed stack. If the leftover can't be spawned the original
+  untamed stack is fully restored (no mob lost). Verified headlessly: post-split the merge sweep leaves
+  the pet (count 1, tamed) and leftover (count 4, untamed) untouched, conserving the original count.
 
 ### 2026-05-31 — Repository hygiene (`dcc5498`)
 

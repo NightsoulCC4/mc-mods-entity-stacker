@@ -360,6 +360,22 @@ public final class StackEventHandler {
 
         partner.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
         partner.setAge(0);                                  // adult, ready to breed
+
+        // CRITICAL ORDERING: put the partner in love BEFORE adding it to the world.
+        //
+        // If we add it first, ServerEntityEvents.ENTITY_LOAD fires while the partner is still a plain
+        // count-1 adult — a perfectly valid merge candidate — and the merge sweep (which runs
+        // effectively synchronously on the server thread) immediately absorbs it straight back into THIS
+        // still-mergeable stack and discard()s it. The net effect was: the stack count dropped by one,
+        // but no partner ever appeared and no hearts showed — the exact reported breeding bug.
+        //
+        // An in-love animal fails canMerge() (see canMerge: rejects isInLove()), so marking it first
+        // makes it un-absorbable the instant it loads. setInLove is safe pre-spawn: the entity's level
+        // is set at construction and the heart broadcast simply reaches no trackers yet (the continuous
+        // love hearts resume once it ticks). This re-enters setInLove, but count == 1 so it does NOT
+        // split again — it just falls through to vanilla and becomes a normal in-love animal.
+        partner.setInLove(player);
+
         if (!level.addFreshEntity(partner)) {
             return false;                                   // spawn rejected — leave the stack intact (no adult lost)
         }
@@ -367,9 +383,14 @@ public final class StackEventHandler {
         // Only now that the partner is really in the world do we take one out of the stack, so the
         // adult-count invariant holds even if the add fails.
         setCount(self, count - 1);                          // unstack one (updates the floating name)
-        // The split-off single (count 1) now enters love. This re-enters setInLove, but count == 1 so
-        // it does NOT split again — it just falls through to vanilla and becomes a normal in-love animal.
-        partner.setInLove(player);
+
+        // Feed feedback: pop the heart particles on the STACK itself at the moment of feeding, exactly
+        // like vanilla setInLove does for a normal fed animal. The stack does NOT actually enter love
+        // mode (only the split-off partner breeds) — entity event 18 (IN_LOVE_HEARTS) is a pure
+        // client-side particle burst, so the player still gets the familiar "fed -> hearts" feedback on
+        // the animal they clicked, while the split-off partner carries the continuous hearts as it seeks
+        // a mate.
+        level.broadcastEntityEvent(self, (byte) 18);
         return true;
     }
 
@@ -382,30 +403,57 @@ public final class StackEventHandler {
      * {@code TamableAnimal#tame(Player)} (fired when a wolf/cat/parrot is successfully tamed).
      *
      * <p>A stack is a SINGLE entity, so taming it would otherwise tame all of its members at once.
-     * Instead we spawn the leftover {@code (count - 1)} as a separate UNTAMED stack and drop the
-     * interacted entity's count to 1, then let vanilla tame just that one individual. Because the
-     * tamed pet IS the original entity, it keeps its own variant / collar / sit pose / hearts / owner;
-     * only the (less noticeable) leftover herd is re-created as a default-variant stack.</p>
+     * Instead we keep the interacted entity AS the single tamed pet (count 1) and spawn the leftover
+     * {@code (count - 1)} beside it as a separate UNTAMED stack. Because the tamed pet IS the original
+     * entity, it keeps its own variant / collar / sit pose / hearts / owner; only the (less noticeable)
+     * leftover herd is re-created as a default-variant stack.</p>
+     *
+     * <p><b>Ordering matters.</b> We mark {@code self} as tamed BEFORE the leftover joins the world: the
+     * two are co-located same-type wild animals, and if both were stackable for an instant the merge pass
+     * would fuse them right back into one stack which vanilla would then tame whole — the reported bug.
+     * Taming {@code self} first makes it fail {@link #canMerge}, so the leftover has nothing to merge into.</p>
      *
      * <p>No adult is lost or duplicated: {@code self(1, tamed) + remainder(count-1, untamed)} totals
      * the original count. The tamed pet is then excluded from stacking by {@link #isStackable}
      * ({@code TamableAnimal#isTame()}), while the untamed leftover may re-merge with other wild stacks.</p>
      *
-     * <p>If the leftover entity can't be created/added we bail out without touching counts — vanilla
+     * <p>If the leftover entity can't be created/added we restore the original untamed stack — vanilla
      * then tames the whole stack (the old behaviour) rather than risk losing mobs.</p>
+     *
+     * @return the leftover {@code (count-1)} stack that was split off, or {@code null} if nothing was
+     *         split (a normal single, or a creation/spawn failure that left the stack intact).
      */
-    public static void splitOffRemainderBeforeTame(TamableAnimal self) {
+    public static Mob splitOffRemainderBeforeTame(TamableAnimal self) {
         int count = getCount(self);
-        if (count <= 1) return;                             // already a single — vanilla tames it directly
-        if (!(self.level() instanceof ServerLevel level)) return;
+        if (count <= 1) return null;                        // already a single — vanilla tames it directly
+        if (!(self.level() instanceof ServerLevel level)) return null;
 
+        // Build the leftover herd first but DON'T add it yet, so a creation failure costs nothing.
         Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
-        if (!(created instanceof Mob remainder)) return;    // can't recreate the herd — leave the stack as-is
-
+        if (!(created instanceof Mob remainder)) return null; // can't recreate the herd — leave the stack as-is
         remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
-        if (!level.addFreshEntity(remainder)) return;       // spawn rejected — leave the stack intact
-
         setCount(remainder, count - 1);                     // the leftover wild herd, still untamed
-        setCount(self, 1);                                  // 'self' becomes a single -> vanilla tames just this one
+
+        // CRITICAL ORDERING: tame 'self' BEFORE the (still untamed) leftover enters the world.
+        //
+        // 'self' and 'remainder' are co-located, same-type WILD animals. If both were mergeable for even
+        // an instant, the merge pass — which runs effectively synchronously on the server thread (see the
+        // breeding split, which hit the identical hazard) — would fuse them straight back into a single
+        // stack. Vanilla then tames that whole re-merged stack: the reported bug (the entire stack tamed,
+        // with a stray single left over from the race). A tamed animal fails isStackable()/canMerge(), so
+        // taming 'self' first makes the merge-back impossible. Vanilla's tame() body — which called us —
+        // then redundantly re-tames 'self' and sets the real owner; setTame is idempotent.
+        self.setTame(true, true);                           // exclude 'self' from stacking up front
+        setCount(self, 1);                                  // 'self' is the pet -> drop the floating "xN" name
+
+        if (!level.addFreshEntity(remainder)) {
+            // Spawn rejected (rare): fully restore the original untamed stack so no mob is lost. Vanilla
+            // then tames the whole stack — the documented safe fallback rather than risking a vanished herd.
+            self.setTame(false, false);
+            setCount(self, count);
+            return null;
+        }
+
+        return remainder;
     }
 }
