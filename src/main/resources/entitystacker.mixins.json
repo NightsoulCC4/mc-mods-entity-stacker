@@ -4,7 +4,8 @@
   "compatibilityLevel": "JAVA_25",
   "mixins": [
     "AnimalEntityBreedMixin",
-    "LivingEntityInvoker"
+    "LivingEntityInvoker",
+    "TamableAnimalTameMixin"
   ],
   "injectors": {
     "defaultRequire": 1

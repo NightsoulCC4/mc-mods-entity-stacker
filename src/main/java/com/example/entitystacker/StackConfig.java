@@ -27,7 +27,16 @@ public final class StackConfig {
     /** Hard cap on how many entities a single stack can represent. */
     public static final int MAX_STACK = 64;
 
-    /** Toggle stacking per mob category. */
+    /**
+     * Master toggles for which broad mob category may stack at all.
+     *
+     * <p>{@code ALLOW_HOSTILE} gates every {@link net.minecraft.world.entity.monster.Enemy} (zombies,
+     * skeletons, spiders, …). Set it to {@code false} to opt out of hostile stacking entirely — wild
+     * hostiles then never merge and each is killed individually, so their kill advancements/stats are
+     * unaffected by definition. With it {@code true} (the default), hostile stacking is on and
+     * {@code StackEventHandler#onAllowDeath} replays the kill credit on every decrement so each stacked
+     * kill still awards the advancement ("Monster Hunter"/…), mob-kill stat and scoreboard score.</p>
+     */
     public static final boolean ALLOW_PASSIVE = true;
     public static final boolean ALLOW_HOSTILE = true;
 

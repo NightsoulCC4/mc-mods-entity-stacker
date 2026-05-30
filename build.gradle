@@ -1,5 +1,8 @@
 plugins {
-    id 'fabric-loom' version "${loom_version}"
+    // Full plugin id resolves net.fabricmc:fabric-loom:1.16-SNAPSHOT from the Fabric maven (see
+    // settings.gradle). The short 'fabric-loom' alias resolves a release build with different
+    // (older) mapping behaviour, so use the full id to match the official 26.x toolchain.
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
     id 'maven-publish'
 }
 
@@ -11,8 +14,7 @@ base {
 }
 
 loom {
-    // No splitEnvironmentSourceSets(): this mod is entirely server-side logic, so there is no
-    // separate client source set to split out.
+    // Server-side-only mod: no split client source set is needed.
     mods {
         "entitystacker" {
             sourceSet sourceSets.main
@@ -23,14 +25,12 @@ loom {
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
 
-    // Loom REQUIRES an explicit mappings dependency. As of 26.x the toolchain uses Mojang's official
-    // mappings (Yarn is not published for 26.1.2 — hence no yarn_mappings property), so every
-    // Minecraft reference in this mod uses Mojmap names (Mob, Animal#getAge,
-    // LivingEntity#dropAllDeathLoot, ServerLevel, …).
-    mappings loom.officialMojangMappings()
-
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    // No explicit 'mappings' dependency: fabric-loom 1.16 supplies Mojang's official mappings
+    // (Mojmap) by default for 26.x. Yarn is not published for 26.1.2 (hence no yarn_mappings
+    // property), and Mojang's 26.1.2 version JSON has no client_mappings entry, so the old
+    // loom.officialMojangMappings() lookup does NOT work — the Loom default is what provides them.
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
 processResources {
@@ -47,6 +47,8 @@ tasks.withType(JavaCompile).configureEach {
 
 java {
     withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 jar {

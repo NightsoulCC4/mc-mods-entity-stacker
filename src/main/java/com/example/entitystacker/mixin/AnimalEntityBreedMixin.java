@@ -1,43 +1,40 @@
 package com.example.entitystacker.mixin;
 
 import com.example.entitystacker.StackEventHandler;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Fabric has no equivalent of Forge's {@code BabyEntitySpawnEvent}, so we hook {@link Animal}'s
- * breeding directly (Mojang mappings).
+ * Makes a stacked animal actually breedable.
  *
- * <p><b>Why the 3-argument {@code finalizeSpawnChildFromBreeding}?</b> {@code Animal} splits breeding:</p>
- * <ul>
- *   <li>{@code spawnChildFromBreeding(ServerLevel, Animal)} — the entry point the breed goal calls. Its
- *       body is roughly {@code AgeableMob child = getBreedOffspring(...); if (child != null)
- *       finalizeSpawnChildFromBreeding(level, partner, child);}</li>
- *   <li>{@code finalizeSpawnChildFromBreeding(ServerLevel, Animal, AgeableMob child)} — the overload that
- *       actually spawns the baby, applies the 6000-tick cooldown to both parents and resets their love.</li>
- * </ul>
+ * <p>A stack is a SINGLE entity, so feeding it would only ever put one entity into love mode — yet
+ * vanilla breeding needs TWO distinct animals to pair up. That is why a "Cow x5" can't breed with
+ * itself (the reported bug). We hook {@link Animal#setInLove(Player)} — called when an animal is fed
+ * its breeding item — and, for a real stack (count &gt; 1), split ONE individual out as a separate
+ * single animal that enters love mode and serves as a genuine breeding partner.</p>
  *
- * <p>Injecting at the HEAD of the 3-arg method means we only unstack when a child was actually
- * produced (no phantom decrement when a pair fails to breed), and the full descriptor keeps the
- * target unambiguous.</p>
+ * <p>The stack itself is NOT put into love: we {@code cancel()} the original call so only the
+ * split-off single breeds (see {@link StackEventHandler#splitOneForBreeding}). For a normal,
+ * unstacked animal (count == 1) we do nothing and let vanilla run.</p>
  *
- * <p><b>Version note:</b> if a future 26.x mapping renames these methods, the mixin loader will fail
- * with the exact missing target — update the {@code method =} descriptor to match.</p>
+ * <p><b>Version note:</b> the Mojmap target is {@code Animal#setInLove(Player)} (a sibling of
+ * {@code setInLoveTime(int)}, so the bare name is unambiguous). If a future 26.x mapping renames it,
+ * the mixin loader will report the missing target.</p>
  */
 @Mixin(Animal.class)
 public abstract class AnimalEntityBreedMixin {
 
-    @Inject(
-            method = "finalizeSpawnChildFromBreeding(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/animal/Animal;Lnet/minecraft/world/entity/AgeableMob;)V",
-            at = @At("HEAD")
-    )
-    private void entitystacker$onBreed(ServerLevel level, Animal partner, AgeableMob child, CallbackInfo ci) {
+    @Inject(method = "setInLove", at = @At("HEAD"), cancellable = true)
+    private void entitystacker$onEnterLove(Player player, CallbackInfo ci) {
         Animal self = (Animal) (Object) this;
-        StackEventHandler.onBreed(level, self, partner);
+        if (StackEventHandler.splitOneForBreeding(self, player)) {
+            // The stack handled breeding by splitting off a single in-love animal — don't also put
+            // the whole stack into love mode.
+            ci.cancel();
+        }
     }
 }

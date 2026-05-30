@@ -4,7 +4,7 @@ import com.mojang.serialization.Codec;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.attachment.v1.AttachmentRegistry;
 import net.fabricmc.fabric.api.attachment.v1.AttachmentType;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,8 +14,9 @@ import org.slf4j.LoggerFactory;
  * <p>This class only wires up the persistent data storage and delegates all gameplay logic to
  * {@link StackEventHandler}, keeping the two concerns cleanly separated.</p>
  *
- * <p><b>Mappings:</b> 26.x uses Mojang's official mappings (Yarn is not published for it), so all
- * Minecraft type/method names below are Mojmap (e.g. {@code ResourceLocation}, not {@code Identifier}).</p>
+ * <p><b>Mappings:</b> 26.x uses Mojang's official mappings (Yarn is not published for it). Note the
+ * key-class is {@code net.minecraft.resources.Identifier} in 26.x (Mojmap renamed the old
+ * {@code ResourceLocation} to {@code Identifier}).</p>
  */
 public final class EntityStackerMod implements ModInitializer {
 
@@ -32,7 +33,7 @@ public final class EntityStackerMod implements ModInitializer {
      */
     public static final AttachmentType<Integer> STACK_COUNT =
             AttachmentRegistry.createPersistent(
-                    ResourceLocation.fromNamespaceAndPath(MOD_ID, "stack_count"),
+                    Identifier.fromNamespaceAndPath(MOD_ID, "stack_count"),
                     Codec.INT
             );
 

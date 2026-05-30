@@ -1,7 +1,7 @@
 package com.example.entitystacker;
 
 import com.example.entitystacker.mixin.LivingEntityInvoker;
-import net.fabricmc.fabric.api.entity.event.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.network.chat.Component;
@@ -10,11 +10,13 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
@@ -32,8 +34,8 @@ import java.util.Map;
  *   -----------------------------------------------------------------------------
  *   EntityJoinLevelEvent        ->  ServerEntityEvents.ENTITY_LOAD
  *   LivingDeathEvent (cancel)   ->  ServerLivingEntityEvents.ALLOW_DEATH (return false)
- *   BabyEntitySpawnEvent        ->  (no Fabric event) AnimalEntityBreedMixin -> onBreed(...)
- *   LivingTickEvent radius scan ->  ServerTickEvents.END_WORLD_TICK, throttled per level
+ *   BabyEntitySpawnEvent        ->  (no Fabric event) AnimalEntityBreedMixin hooks Animal#setInLove
+ *   LivingTickEvent radius scan ->  ServerTickEvents.END_LEVEL_TICK, throttled per level
  * </pre>
  *
  * <h2>Version-sensitive Mojmap names</h2>
@@ -42,7 +44,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@code Animal#getAge()} (Yarn {@code getBreedingAge}) — &lt;0 baby, 0 ready, &gt;0 cooldown</li>
  *   <li>{@code LivingEntity#dropAllDeathLoot(ServerLevel, DamageSource)} (Yarn {@code drop}) — see invoker</li>
- *   <li>{@code Animal#finalizeSpawnChildFromBreeding(...)} (Yarn 3-arg {@code breed}) — see breed mixin</li>
+ *   <li>{@code Animal#setInLove(Player)} / {@code EntityType#create(Level, EntitySpawnReason)} / {@code Entity#snapTo(...)} — breeding split</li>
  *   <li>{@code Level#getAllEntities()} / {@code getEntitiesOfClass(...)} / {@code AABB#inflate(...)}</li>
  * </ul>
  *
@@ -59,7 +61,7 @@ public final class StackEventHandler {
 
     public static void register() {
         // (1) Throttled radius sweep — the authoritative merge mechanism.
-        ServerTickEvents.END_WORLD_TICK.register(StackEventHandler::onWorldTick);
+        ServerTickEvents.END_LEVEL_TICK.register(StackEventHandler::onWorldTick);
 
         // (2) Fast path: try to merge an entity the moment it loads/spawns.
         ServerEntityEvents.ENTITY_LOAD.register(StackEventHandler::onEntityLoad);
@@ -282,55 +284,128 @@ public final class StackEventHandler {
 
         // It's a real stack: consume a single unit and keep the entity alive.
         setCount(entity, count - 1);
-        entity.setHealth(entity.getMaxHealth());   // revive the survivor (damage had set HP to 0)
+
+        if (entity.level() instanceof ServerLevel serverLevel) {
+            // (a) Make this count as a REAL kill for the killer. Because we cancel vanilla
+            //     LivingEntity#die(), ALL of its kill bookkeeping is skipped — not just loot. The most
+            //     visible casualty is the kill advancement (e.g. "Monster Hunter" / "Monsters Hunted"),
+            //     but mob-kill STATS and SCOREBOARD kill objectives break in exactly the same way: a
+            //     stacked kill silently counts for none of them, while only the final (count==1) unit
+            //     dies for real and is credited. die() routes all three through
+            //     killCredit.awardKillScore(victim, source) — ServerPlayer overrides it to fire the
+            //     PLAYER_KILLED_ENTITY criterion, awardStat(...) and the scoreboard kill score — so we
+            //     replay exactly that call for the one unit we just removed. Do it BEFORE reviving and
+            //     dropping loot, while the kill credit is still fresh (the lethal blow landed this tick).
+            //     Both getKillCredit() and awardKillScore(Entity, DamageSource) are public in 26.x — no
+            //     mixin/invoker needed. (We deliberately do NOT replay entity#killedEntity(...): loot is
+            //     already forced below, and that hook can carry side effects we don't want duplicated.)
+            LivingEntity killCredit = entity.getKillCredit();
+            if (killCredit != null) {
+                killCredit.awardKillScore(entity, source);
+            }
+
+            // (b) Reproduce vanilla's FULL death-drop sequence for exactly one unit at its location.
+            //     dropAllDeathLoot(ServerLevel, DamageSource) is the very method LivingEntity#die calls:
+            //     it rolls the loot table AND drops equipment/inventory, derives the "killed by player"
+            //     flag from the player-hit window (so looting bonus + player-gated drops behave like a
+            //     normal kill), and applies the relevant gamerules (doMobLoot, …) itself — so we must
+            //     NOT pre-gate it.
+            ((LivingEntityInvoker) entity).entitystacker$dropAllDeathLoot(serverLevel, source);
+        }
+
+        // Revive the survivor (the lethal damage had driven HP to 0) and clear the death/combat state
+        // so the next hit starts a clean kill — kill credit was already harvested above.
+        entity.setHealth(entity.getMaxHealth());
         entity.hurtTime = 0;
         entity.deathTime = 0;
         entity.clearFire();                         // don't leave the survivor on fire, etc.
-
-        // Reproduce vanilla's FULL death-drop sequence for exactly one unit at its location.
-        // dropAllDeathLoot(ServerLevel, DamageSource) is the very method LivingEntity#die calls: it
-        // rolls the loot table AND drops equipment/inventory, derives the "killed by player" flag from
-        // the player-hit window (so looting bonus + player-gated drops behave like a normal kill), and
-        // applies the relevant gamerules (doMobLoot, …) itself — so we must NOT pre-gate it.
-        if (entity.level() instanceof ServerLevel serverLevel) {
-            ((LivingEntityInvoker) entity).entitystacker$dropAllDeathLoot(serverLevel, source);
-        }
 
         return false;   // cancel the real death/removal.
     }
 
     /* ====================================================================== */
-    /* (4) Breeding (called from AnimalEntityBreedMixin)                      */
+    /* (4) Breeding — split one individual out of a stack so it can breed     */
     /* ====================================================================== */
 
     /**
-     * Called from {@link com.example.entitystacker.mixin.AnimalEntityBreedMixin}, which injects at the
-     * HEAD of {@code Animal#finalizeSpawnChildFromBreeding(ServerLevel, Animal, AgeableMob)}. That
-     * method runs ONLY after vanilla's {@code getBreedOffspring(...)} produced a child, so the
-     * decrement is correctly gated on a real offspring — there is no phantom unstack when a pair fails
-     * to breed. Each stacked parent loses one unit to "unstack" the individual that just bred.
+     * Called from {@link com.example.entitystacker.mixin.AnimalEntityBreedMixin} at the HEAD of
+     * {@code Animal#setInLove(Player)} (fired when an animal is fed its breeding item).
      *
-     * <p>Vanilla then spawns the baby, sets BOTH parents' age to 6000 (the 5-minute cooldown) and
-     * resets their love state. Because {@link #canMerge} rejects any animal whose {@code getAge() != 0},
-     * the freshly-bred parents cannot re-merge into a stack until that cooldown counts back to 0.</p>
+     * <p><b>Why this is necessary:</b> a stack is a SINGLE entity, so feeding it would only ever put
+     * one entity into love mode — but vanilla breeding needs TWO distinct animals to pair up. So a
+     * stack could never breed with itself, which is exactly the reported bug. Here we "unstack" one
+     * individual: decrement the stack by 1 and spawn a fresh single adult of the same type that
+     * enters love mode and acts as the real breeding partner.</p>
      *
-     * <p><b>Known limitation of the single-entity stacking model:</b> the cooldown is applied to the
-     * one entity that now represents the entire remaining stack (e.g. Cow x5 → Cow x4), so the whole
-     * remaining stack is gated for the cooldown and a large stack releases only one baby per cycle.
-     * For per-individual breeding you would split the breeder off as its own count-1 entity that
-     * carries the cooldown while the rest of the stack stays ready.</p>
+     * <p>The stack itself is NOT put into love (the caller cancels the original {@code setInLove}); only
+     * the split-off single breeds. Two feeds therefore yield two singles that pair and produce a baby —
+     * the same two-feed cost as vanilla. After breeding, vanilla sets the singles' age to the cooldown,
+     * and {@link #canMerge} (which rejects {@code getAge() != 0} and {@code isInLove()}) keeps them out
+     * of any stack until the cooldown reaches 0, at which point they re-merge — so no adult is ever
+     * lost, babies are simply added.</p>
+     *
+     * @return {@code true} if a single was split off (caller should cancel the stack's own love state);
+     *         {@code false} for a normal, unstacked animal (let vanilla breed it directly).
      */
-    public static void onBreed(ServerLevel level, Animal self, Animal partner) {
-        unstackForBreeding(self);
-        if (partner != null) {
-            unstackForBreeding(partner);
+    public static boolean splitOneForBreeding(Animal self, Player player) {
+        int count = getCount(self);
+        if (count <= 1) return false;                       // a normal single — vanilla breeds it directly
+        if (!(self.level() instanceof ServerLevel level)) return false;
+
+        // Create the breeding partner FIRST, so we only take one out of the stack if it succeeds.
+        Entity created = self.getType().create(level, EntitySpawnReason.BREEDING);
+        if (!(created instanceof Animal partner)) {
+            return false;                                   // couldn't create — leave the stack intact
         }
+
+        partner.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        partner.setAge(0);                                  // adult, ready to breed
+        if (!level.addFreshEntity(partner)) {
+            return false;                                   // spawn rejected — leave the stack intact (no adult lost)
+        }
+
+        // Only now that the partner is really in the world do we take one out of the stack, so the
+        // adult-count invariant holds even if the add fails.
+        setCount(self, count - 1);                          // unstack one (updates the floating name)
+        // The split-off single (count 1) now enters love. This re-enters setInLove, but count == 1 so
+        // it does NOT split again — it just falls through to vanilla and becomes a normal in-love animal.
+        partner.setInLove(player);
+        return true;
     }
 
-    private static void unstackForBreeding(Animal parent) {
-        int count = getCount(parent);
-        if (count > 1) {
-            setCount(parent, count - 1);
-        }
+    /* ====================================================================== */
+    /* (5) Taming — hand out one pet instead of taming the whole stack        */
+    /* ====================================================================== */
+
+    /**
+     * Called from {@link com.example.entitystacker.mixin.TamableAnimalTameMixin} at the HEAD of
+     * {@code TamableAnimal#tame(Player)} (fired when a wolf/cat/parrot is successfully tamed).
+     *
+     * <p>A stack is a SINGLE entity, so taming it would otherwise tame all of its members at once.
+     * Instead we spawn the leftover {@code (count - 1)} as a separate UNTAMED stack and drop the
+     * interacted entity's count to 1, then let vanilla tame just that one individual. Because the
+     * tamed pet IS the original entity, it keeps its own variant / collar / sit pose / hearts / owner;
+     * only the (less noticeable) leftover herd is re-created as a default-variant stack.</p>
+     *
+     * <p>No adult is lost or duplicated: {@code self(1, tamed) + remainder(count-1, untamed)} totals
+     * the original count. The tamed pet is then excluded from stacking by {@link #isStackable}
+     * ({@code TamableAnimal#isTame()}), while the untamed leftover may re-merge with other wild stacks.</p>
+     *
+     * <p>If the leftover entity can't be created/added we bail out without touching counts — vanilla
+     * then tames the whole stack (the old behaviour) rather than risk losing mobs.</p>
+     */
+    public static void splitOffRemainderBeforeTame(TamableAnimal self) {
+        int count = getCount(self);
+        if (count <= 1) return;                             // already a single — vanilla tames it directly
+        if (!(self.level() instanceof ServerLevel level)) return;
+
+        Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
+        if (!(created instanceof Mob remainder)) return;    // can't recreate the herd — leave the stack as-is
+
+        remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        if (!level.addFreshEntity(remainder)) return;       // spawn rejected — leave the stack intact
+
+        setCount(remainder, count - 1);                     // the leftover wild herd, still untamed
+        setCount(self, 1);                                  // 'self' becomes a single -> vanilla tames just this one
     }
 }

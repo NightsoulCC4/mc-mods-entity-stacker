@@ -16,13 +16,21 @@ unstacks one parent per successful breed while respecting the breeding cooldown.
 | **Java**         | **25**                         |
 | Gradle           | `9.4.1`                        |
 
-> **Mappings matter for this code.** `build.gradle` declares `mappings loom.officialMojangMappings()`
-> (Loom requires an explicit mappings dependency; Yarn is not published for 26.1.2, hence no
-> `yarn_mappings` property). Every Minecraft reference therefore uses Mojmap names:
+> **Mappings matter for this code.** The 26.x toolchain uses Mojang's official mappings (Mojmap).
+> `build.gradle` has **no** `mappings` line and **no** `loom.officialMojangMappings()` call — Loom
+> 1.16 supplies Mojmap by default (Yarn is not published for 26.1.2, and Mojang's 26.1.2 version JSON
+> has no `client_mappings`, so the explicit `officialMojangMappings()` lookup fails — don't add it).
+> Use the full plugin id `net.fabricmc.fabric-loom`, not the `fabric-loom` alias. Every Minecraft
+> reference uses Mojmap names:
 > `Mob`/`Animal`/`AgeableMob`, `Animal#getAge()`, `LivingEntity#dropAllDeathLoot(...)`,
-> `Animal#finalizeSpawnChildFromBreeding(...)`, `ServerLevel`, `Component`, `AABB`, `ResourceLocation`.
-> The few version‑sensitive method names are flagged with `Version note:` comments in the source; if a
-> later 26.x mapping renames one, the compiler / mixin loader points at the exact spot to fix.
+> `Animal#finalizeSpawnChildFromBreeding(...)`, `ServerLevel`, `Component`, `AABB`.
+>
+> **26.x specifics confirmed by building against the real jars:**
+> - `net.minecraft.resources.Identifier` (26.x Mojmap renamed `ResourceLocation` → `Identifier`).
+> - Fabric API 0.150: `ServerEntityEvents` lives in `…api.event.lifecycle.v1` (not `…entity.event.v1`);
+>   `ServerLivingEntityEvents` stays in `…entity.event.v1`. The tick fields were renamed
+>   `WORLD`→`LEVEL`: use `ServerTickEvents.END_LEVEL_TICK` (not `END_WORLD_TICK`).
+>   `ServerEntityEvents.ENTITY_LOAD` is unchanged.
 
 ## Building
 
@@ -53,7 +61,7 @@ Then:
 | Merge (radius scan)  | Throttled `ServerTickEvents.END_WORLD_TICK` sweep (every 20 ticks)          |
 | Merge (instant)      | `ServerEntityEvents.ENTITY_LOAD` fast‑path                                  |
 | Combat / drops       | `ServerLivingEntityEvents.ALLOW_DEATH` → decrement + `dropAllDeathLoot(...)`|
-| Breeding             | Mixin on `Animal#finalizeSpawnChildFromBreeding(...)` → unstack one parent  |
+| Breeding             | Mixin on `Animal#setInLove(...)` → split one in-love single off the stack    |
 
 ### Forge → Fabric event mapping
 
@@ -61,8 +69,8 @@ Then:
 |-----------------------------|---------------------------------------------------------|
 | `EntityJoinLevelEvent`      | `ServerEntityEvents.ENTITY_LOAD`                        |
 | `LivingDeathEvent` (cancel) | `ServerLivingEntityEvents.ALLOW_DEATH` (return `false`) |
-| `BabyEntitySpawnEvent`      | `AnimalEntityBreedMixin` → `StackEventHandler.onBreed`  |
-| `LivingTickEvent` scan      | throttled `ServerTickEvents.END_WORLD_TICK`             |
+| `BabyEntitySpawnEvent`      | `AnimalEntityBreedMixin` (hooks `Animal#setInLove`)     |
+| `LivingTickEvent` scan      | throttled `ServerTickEvents.END_LEVEL_TICK`             |
 
 ## Tuning
 
@@ -70,8 +78,39 @@ See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggl
 
 ## Known limitations
 
-- **Whole‑stack breeding cooldown:** the cooldown applies to the single entity that represents the
-  remaining stack, so a big stack releases one baby per cooldown cycle (see `onBreed` Javadoc).
+- **Breeding splits one out per feed:** feeding a stack splits off a single in-love animal (the stack
+  itself doesn't enter love), so it takes two feeds — same cost as vanilla — to make a baby. The
+  split-off singles go on the normal cooldown and re-merge into the stack once it expires; no adult is
+  lost. See `StackEventHandler.splitOneForBreeding`.
 - **Variant‑blind merging:** stacks are keyed by entity *type* only. Add a variant comparison in
   `StackEventHandler.compatible(...)` to keep e.g. differently‑coloured sheep separate.
 - A despawning stack takes all its units with it (no spill).
+
+## Changelog
+
+Newest first. Dates are commit dates.
+
+### 2026-05-31 — Repository hygiene (`dcc5498`)
+
+- Added a Fabric/Gradle `.gitignore` so build output, Gradle caches, IDE files, and logs stay out of
+  version control going forward.
+- Untracked the `.gradle/` cache files and `build-verify.log` that had been committed by mistake.
+
+### 2026-05-31 — Initial release (`228623a`)
+
+First working version of the mod. Establishes the full feature set and build setup:
+
+- **Core stacking** — `StackEventHandler` merges identical nearby mobs into one counted entity via a
+  throttled `ServerTickEvents` radius sweep plus an `ServerEntityEvents.ENTITY_LOAD` instant fast‑path.
+- **Overhead count** — stack size shown as a `CustomName` (`Cow x5`), auto‑synced to clients.
+- **Death handling** — `ServerLivingEntityEvents.ALLOW_DEATH` decrements the stack one unit at a time
+  (instead of one‑shotting the whole pile) and drops proper loot via `dropAllDeathLoot(...)`.
+- **Breeding** — `AnimalEntityBreedMixin` (hooking `Animal#setInLove`) splits a single in‑love animal
+  off the stack per feed, respecting the vanilla breeding cooldown; `LivingEntityInvoker` exposes the
+  needed protected method.
+- **Configuration** — `StackConfig` exposes radius, sweep interval, max stack size, passive/hostile
+  toggles, and a blacklist.
+- **Mod plumbing** — `EntityStackerMod` entry point, `entitystacker.mixins.json` mixin config, and
+  `fabric.mod.json` metadata/dependencies/entry points.
+- **Build** — `build.gradle`, `settings.gradle`, `gradle.properties`, and the Gradle wrapper, targeting
+  the Minecraft `26.1.2` Fabric + Mojmap + Java 25 toolchain.
