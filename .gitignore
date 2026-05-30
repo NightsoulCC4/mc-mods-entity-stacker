@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+out/
+classes/
+
+# Fabric Loom
+.loom-cache/
+run/
+*.log
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# IDE - VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
