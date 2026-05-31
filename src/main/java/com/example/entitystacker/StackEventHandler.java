@@ -1,9 +1,11 @@
 package com.example.entitystacker;
 
 import com.example.entitystacker.mixin.LivingEntityInvoker;
+import com.example.entitystacker.mixin.WolfVariantInvoker;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.core.Holder;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
@@ -19,7 +21,14 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.animal.chicken.Chicken;
+import net.minecraft.world.entity.animal.cow.Cow;
+import net.minecraft.world.entity.animal.cow.MushroomCow;
 import net.minecraft.world.entity.animal.feline.Cat;
+import net.minecraft.world.entity.animal.parrot.Parrot;
+import net.minecraft.world.entity.animal.pig.Pig;
+import net.minecraft.world.entity.animal.sheep.Sheep;
+import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.TagValueOutput;
@@ -196,11 +205,42 @@ public final class StackEventHandler {
         if (target instanceof Animal animal) animal.setInLoveTime(0);      // no inherited love timer
     }
 
-    /** Two mobs may merge only if they are the exact same type. */
-    private static boolean compatible(Mob a, Mob b) {
-        return a.getType() == b.getType();
-        // EXTENSION POINT: also compare variants (sheep colour, cat/axolotl/horse variant, …)
-        // here if you don't want visually different mobs collapsing into one stack.
+    /**
+     * @return whether {@code other} belongs to the same stack group as a keeper identified by its
+     *         pre-computed {@code (type, variantKey)} — i.e. the same entity type AND the same visible
+     *         variant. Taking the keeper's key pre-computed lets the hot merge loops compute it once per
+     *         keeper instead of once per candidate.
+     *
+     * <p>Variant-awareness is what keeps a white sheep and a black sheep (or a warm cow and a cold cow)
+     * in separate stacks. Because the key is read live, re-colouring/converting a mob (e.g. dyeing a
+     * white sheep black) moves it into its new variant's group on the next merge pass — the requested
+     * "dye it and it stacks normally" behaviour, with no special-casing.</p>
+     */
+    private static boolean sameGroup(EntityType<?> type, String variant, Mob other) {
+        return other.getType() == type && variant.equals(variantKey(other));
+    }
+
+    /**
+     * A stable string identifying a mob's visible variant, or {@code ""} for mobs with no tracked variant
+     * (those stack by type alone, as before). Covers the biome/colour variants added in 26.x. Wolf's
+     * {@code getVariant()} is {@code private}, so it is read through {@link WolfVariantInvoker}; every
+     * other type here has a public getter.
+     */
+    private static String variantKey(Mob m) {
+        if (m instanceof Sheep s) return "sheep:" + s.getColor();                 // wool colour
+        if (m instanceof MushroomCow mc) return "mooshroom:" + mc.getVariant();   // red / brown
+        if (m instanceof Cow c) return holderKey(c.getVariant());
+        if (m instanceof Pig p) return holderKey(p.getVariant());
+        if (m instanceof Chicken ch) return holderKey(ch.getVariant());
+        if (m instanceof Cat ct) return holderKey(ct.getVariant());
+        if (m instanceof Parrot pr) return "parrot:" + pr.getVariant();
+        if (m instanceof Wolf w) return holderKey(((WolfVariantInvoker) w).entitystacker$getVariant());
+        return "";
+    }
+
+    /** Registry id of a variant holder (e.g. "minecraft:cold"), stable across entities of that variant. */
+    private static String holderKey(Holder<?> h) {
+        return h == null ? "" : h.unwrapKey().map(Object::toString).orElse(h.toString());
     }
 
     /* ====================================================================== */
@@ -230,14 +270,17 @@ public final class StackEventHandler {
         // Throttle: only sweep once every MERGE_INTERVAL ticks for performance.
         if (level.getGameTime() % StackConfig.MERGE_INTERVAL != 0L) return;
 
-        // Gather every currently-mergeable mob once, tallying how many share each type so we can
-        // skip the (relatively expensive) spatial query for types that have no possible partner.
+        // Gather every currently-mergeable mob once, tallying how many share each stacking GROUP
+        // (type + variant) so we can skip the (relatively expensive) spatial query for a mob that has no
+        // possible partner — including a lone-of-its-variant mob in a mixed herd (e.g. the only black
+        // sheep among whites), which a type-only tally would wrongly wave through.
         List<Mob> candidates = new ArrayList<>();
-        Map<EntityType<?>, Integer> typeCounts = new HashMap<>();
+        Map<EntityType<?>, Map<String, Integer>> groupCounts = new HashMap<>();
         for (Entity e : level.getAllEntities()) {
             if (e instanceof Mob mob && canMerge(mob)) {
                 candidates.add(mob);
-                typeCounts.merge(mob.getType(), 1, Integer::sum);
+                groupCounts.computeIfAbsent(mob.getType(), k -> new HashMap<>())
+                        .merge(variantKey(mob), 1, Integer::sum);
             }
         }
         if (candidates.size() < 2) return;
@@ -247,24 +290,26 @@ public final class StackEventHandler {
         for (Mob keeper : candidates) {
             if (keeper.isRemoved() || getCount(keeper) >= StackConfig.MAX_STACK) continue;
 
-            // Cheap pre-filter: a lone mob of its type (the common case for wild wanderers) can
-            // never merge, so don't bother issuing a spatial query for it.
-            if (typeCounts.getOrDefault(keeper.getType(), 0) < 2) continue;
+            // Compute the keeper's variant key ONCE (not per candidate), then pre-filter: a mob with no
+            // same-type-and-variant mate nearby can never merge, so skip its spatial query entirely.
+            Map<String, Integer> byVariant = groupCounts.get(keeper.getType());
+            String keeperVariant = variantKey(keeper);
+            if (byVariant == null || byVariant.getOrDefault(keeperVariant, 0) < 2) continue;
 
             // Broad-phase via the level's spatial entity index, then an exact sphere check.
             AABB box = keeper.getBoundingBox().inflate(StackConfig.RADIUS);
             List<Mob> nearby = level.getEntitiesOfClass(Mob.class, box, other ->
                        other != keeper
                     && !other.isRemoved()
-                    && compatible(keeper, other)
+                    && sameGroup(keeper.getType(), keeperVariant, other)
                     && canMerge(other)
                     && keeper.distanceToSqr(other) <= r2);
 
             for (Mob other : nearby) {
                 if (keeper.isRemoved() || getCount(keeper) >= StackConfig.MAX_STACK) break;
                 merge(keeper, other);
-                // One fewer distinct mob of this type now exists (the absorbed one was discarded).
-                typeCounts.merge(keeper.getType(), -1, Integer::sum);
+                // One fewer distinct mob of this group now exists (the absorbed one was discarded).
+                byVariant.merge(keeperVariant, -1, Integer::sum);
             }
         }
     }
@@ -293,12 +338,14 @@ public final class StackEventHandler {
 
             final double r2 = StackConfig.RADIUS * StackConfig.RADIUS;
             AABB box = mob.getBoundingBox().inflate(StackConfig.RADIUS);
+            final EntityType<?> type = mob.getType();
+            final String variant = variantKey(mob);   // compute once, not per candidate
 
-            // Merge INTO the largest nearby compatible stack so counts coalesce upward.
+            // Merge INTO the largest nearby same-type-and-variant stack so counts coalesce upward.
             Mob keeper = currentLevel.getEntitiesOfClass(Mob.class, box, other ->
                        other != mob
                     && !other.isRemoved()
-                    && compatible(mob, other)
+                    && sameGroup(type, variant, other)
                     && canMerge(other)
                     && mob.distanceToSqr(other) <= r2)
                     .stream()
@@ -456,9 +503,10 @@ public final class StackEventHandler {
      *
      * <p>A stack is a SINGLE entity, so taming it would otherwise tame all of its members at once.
      * Instead we keep the interacted entity AS the single tamed pet (count 1) and spawn the leftover
-     * {@code (count - 1)} beside it as a separate UNTAMED stack. Because the tamed pet IS the original
-     * entity, it keeps its own variant / collar / sit pose / hearts / owner; only the (less noticeable)
-     * leftover herd is re-created as a default-variant stack.</p>
+     * {@code (count - 1)} beside it as a separate UNTAMED stack. The tamed pet IS the original entity, so
+     * it keeps its own variant / collar / sit pose / hearts / owner. The leftover herd's look is matched
+     * to the original: a wolf (biome variant) inherits the original's variant via {@link #copyDataFrom},
+     * while a cat (not biome-based) rolls a fresh random variant via {@code finalizeSpawn}.</p>
      *
      * <p><b>Ordering matters.</b> We mark {@code self} as tamed BEFORE the leftover joins the world: the
      * two are co-located same-type wild animals, and if both were stackable for an instant the merge pass

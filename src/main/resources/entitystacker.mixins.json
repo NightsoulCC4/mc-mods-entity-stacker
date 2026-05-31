@@ -5,7 +5,8 @@
   "mixins": [
     "AnimalEntityBreedMixin",
     "LivingEntityInvoker",
-    "TamableAnimalTameMixin"
+    "TamableAnimalTameMixin",
+    "WolfVariantInvoker"
   ],
   "injectors": {
     "defaultRequire": 1
