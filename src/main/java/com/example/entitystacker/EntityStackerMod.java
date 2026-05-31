@@ -40,7 +40,9 @@ public final class EntityStackerMod implements ModInitializer {
     @Override
     public void onInitialize() {
         LOGGER.info("Initializing Entity Stacker...");
+        StackConfig.load();          // restore per-mob toggles (writes defaults on first run)
         StackEventHandler.register();
+        StackCommands.register();     // /entitystacker — settings GUI + list/set sub-commands
         LOGGER.info("Entity Stacker ready.");
     }
 }

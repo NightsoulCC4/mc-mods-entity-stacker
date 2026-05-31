@@ -87,7 +87,8 @@ public final class StackEventHandler {
 
         // (4) Breeding is driven by AnimalEntityBreedMixin, which calls splitOneForBreeding(...).
         // (5) Taming is driven by TamableAnimalTameMixin, which calls splitOffRemainderBeforeTame(...).
-        // (6) Shearing is driven by SheepShearMixin, which calls splitOffOneForShearing(...).
+        // (6) Sheep shearing is driven by SheepShearMixin, which calls splitOffOneForShearing(...).
+        // (7) Mooshroom shearing is driven by MushroomCowShearMixin, which calls splitOffOneForMooshroomShearing(...).
     }
 
     /* ====================================================================== */
@@ -144,6 +145,7 @@ public final class StackEventHandler {
         if (mob instanceof AgeableMob age && age.isBaby()) return false;         // never stack babies
         if (mob instanceof TamableAnimal tame && tame.isTame()) return false;    // never stack pets
         if (!StackConfig.isTypeAllowed(mob.getType())) return false;
+        if (!StackConfig.isMobStackingEnabled(mob.getType())) return false;      // player toggle (GUI/command)
         if (!StackConfig.isCategoryAllowed(mob)) return false;
 
         // Respect player name-tags: a single (un-stacked) mob that already carries a custom name was
@@ -448,6 +450,11 @@ public final class StackEventHandler {
     public static boolean splitOneForBreeding(Animal self, Player player) {
         int count = getCount(self);
         if (count <= 1) return false;                       // a normal single — vanilla breeds it directly
+        // Disabled type (per-mob toggle off): opt the stack out of split-on-breed too, so an already
+        // existing disabled stack behaves like a frozen vanilla blob — it neither grows nor sheds
+        // singles that could never re-merge (canMerge would reject them). It can still be whittled down
+        // by killing one unit at a time (onAllowDeath, which is intentionally toggle-agnostic).
+        if (!StackConfig.isMobStackingEnabled(self.getType())) return false;
         if (!(self.level() instanceof ServerLevel level)) return false;
 
         // Create the breeding partner FIRST, so we only take one out of the stack if it succeeds.
@@ -530,6 +537,7 @@ public final class StackEventHandler {
     public static Mob splitOffRemainderBeforeTame(TamableAnimal self) {
         int count = getCount(self);
         if (count <= 1) return null;                        // already a single — vanilla tames it directly
+        if (!StackConfig.isMobStackingEnabled(self.getType())) return null;      // disabled type: don't split (see splitOneForBreeding)
         if (!(self.level() instanceof ServerLevel level)) return null;
 
         // Build the leftover herd first but DON'T add it yet, so a creation failure costs nothing.
@@ -580,61 +588,155 @@ public final class StackEventHandler {
     /* ====================================================================== */
 
     /**
-     * Called from {@link com.example.entitystacker.mixin.SheepShearMixin} at the HEAD of
+     * Called from {@link com.example.entitystacker.mixin.SheepShearMixin} at the RETURN of
      * {@code Sheep#shear(...)} (fired when a sheep is sheared — by a player or a dispenser).
      *
      * <p>A stack is a SINGLE entity, so shearing "Sheep x5" would otherwise drop just one fleece while
      * the count stayed at 5 and no sheep ever split off — the reported bug. Instead we keep the
-     * interacted sheep AS the single one that gets sheared (count 1) and spawn the leftover
-     * {@code (count - 1)} beside it as a separate UNSHEARED flock. Vanilla's own {@code shear} body —
-     * which called us — then runs on this one sheep and drops its wool normally.</p>
+     * interacted sheep AS the single one that was just sheared (count 1) and spawn the leftover
+     * {@code (count - 1)} beside it as a separate, still-FLEECED flock.</p>
      *
-     * <p>The leftover flock is cloned from {@code self} <i>before</i> vanilla shears it, so it carries
-     * {@code self}'s wool colour and is itself unsheared (it still has its fleece). We never cancel, so
-     * exactly one fleece drops — for the single unit we left behind.</p>
+     * <p><b>Why this runs at RETURN.</b> The shear loot table ({@code shearing/sheep.json}) gates every
+     * wool entry on {@code sheared:false}, so vanilla deliberately rolls the fleece BEFORE flipping the
+     * sheared flag. By the time we run, vanilla has already dropped the wool and set {@code self}
+     * sheared. We clone {@code self} (which therefore copies its colour) and then explicitly clear the
+     * clone's sheared flag, because the leftover represents the {@code (count-1)} sheep that were NOT
+     * sheared and still carry their wool. Exactly one fleece dropped — for the single unit we kept.</p>
      *
-     * <p><b>Ordering matters.</b> We mark {@code self} as sheared BEFORE the leftover joins the world.
-     * The two are co-located same-colour sheep, and a sheared sheep has a different {@link #variantKey}
-     * from an unsheared one, so marking {@code self} sheared first makes it un-mergeable with the
-     * still-fleeced leftover — otherwise the merge pass (which runs effectively synchronously on the
-     * server thread; see the breeding/taming splits, which hit the identical hazard) could fuse them
-     * straight back into one stack. Vanilla's {@code shear} body then re-sets sheared (idempotent) and
-     * drops the wool.</p>
+     * <p><b>No merge-back, for free.</b> {@code self} is ALREADY sheared when we add the fleeced
+     * leftover, so the two sit in different {@link #variantKey} groups ("…:sheared" vs not) and the
+     * merge pass — which can run effectively synchronously on the server thread (see the breeding/taming
+     * splits, which had to pre-empt the identical hazard) — cannot fuse them. No pre-emptive marking is
+     * needed: vanilla's own {@code setSheared(true)} already did it.</p>
      *
      * <p>No sheep is lost: {@code self(1, sheared) + remainder(count-1, fleeced)} totals the original
      * count. The sheared single re-merges with the flock once it eats grass and regrows its wool (its
      * variant key flips back), so the stack heals itself naturally — no special-casing.</p>
      *
-     * <p>If the leftover can't be created/added we restore the original stack untouched; vanilla then
-     * shears the whole stack (one fleece, the old behaviour) rather than risk losing sheep.</p>
+     * <p>If the leftover can't be created/added we restore the original count; vanilla's single fleece
+     * still dropped, so at worst the whole stack reads as sheared (a rare, cosmetic-only fallback) rather
+     * than risking a lost or duplicated sheep.</p>
      *
      * @return {@code true} if a single was peeled off; {@code false} for a normal single or a
      *         creation/spawn failure that left the stack intact.
      */
     public static boolean splitOffOneForShearing(Sheep self) {
         int count = getCount(self);
-        if (count <= 1) return false;                       // a normal single — vanilla shears it directly
+        if (count <= 1) return false;                       // a normal single — vanilla sheared it directly
+        if (!StackConfig.isMobStackingEnabled(self.getType())) return false;     // disabled type: don't split (see splitOneForBreeding)
         if (!(self.level() instanceof ServerLevel level)) return false;
 
         // Build the leftover flock first but DON'T add it yet, so a creation failure costs nothing.
         Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
         if (!(created instanceof Sheep remainder)) return false; // can't recreate the flock — leave it as-is
 
-        // Clone self's look (wool colour) into the leftover. self is still UNSHEARED at this HEAD
-        // injection, so the clone is an unsheared, same-colour flock that keeps its fleece.
+        // Clone self's look (wool colour) into the leftover. self has JUST been sheared by vanilla, so the
+        // clone comes out sheared too — clear it: the leftover is the (count-1) sheep that kept their wool.
+        copyDataFrom(remainder, self, level);
+        remainder.setSheared(false);                        // the leftover flock still has its fleece
+        remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        setCount(remainder, count - 1);                     // the leftover flock
+
+        setCount(self, 1);                                  // 'self' is the one that was sheared -> drop the "xN" name
+
+        // self is already sheared (vanilla did it), so it is in a different variant group from the fleeced
+        // leftover and cannot merge back even if the merge runs synchronously inside addFreshEntity.
+        if (!level.addFreshEntity(remainder)) {
+            // Spawn rejected (rare): restore the original count so no sheep is lost. The single fleece
+            // vanilla dropped stands; the stack just reads as sheared — a cosmetic-only safe fallback.
+            setCount(self, count);
+            return false;
+        }
+
+        return true;
+    }
+
+    /* ====================================================================== */
+    /* (7) Shearing a mooshroom — peel one off, let it convert to a cow        */
+    /* ====================================================================== */
+
+    /**
+     * Called from {@link com.example.entitystacker.mixin.MushroomCowShearMixin} at the HEAD of
+     * {@code MushroomCow#shear(...)} (fired when a mooshroom is sheared by a player or a dispenser).
+     *
+     * <p><b>The bug:</b> unlike a sheep (which merely flips a sheared flag and survives), vanilla shears a
+     * mooshroom by {@code convertTo(EntityType.COW, ...)} — it DISCARDS the mooshroom and spawns a Cow in
+     * its place, then drops mushrooms from the {@code SHEAR_MOOSHROOM} loot table. With no intervention,
+     * shearing a stacked "Mooshroom x5" converts that one stack-bearing entity wholesale: its count and
+     * the floating "xN" name ride across onto the replacement cow ({@code convertTo} copies the source's
+     * custom name and Fabric's persistent attachments), so the whole stack becomes cows at once while only
+     * a single mushroom drop is rolled — the reported behaviour.</p>
+     *
+     * <p><b>The fix</b> (mirror of {@link #splitOffOneForShearing}, but inverted): we peel the leftover
+     * {@code (count - 1)} off as its own surviving mooshroom stack, then reduce the interacted entity to a
+     * clean single — count 1, no floating name, attachment removed — <i>before</i> vanilla's
+     * {@code convertTo} runs. Vanilla then converts that single mooshroom into exactly ONE fresh cow and
+     * rolls one normal mushroom drop. Net result: the stack on the mooshroom's head drops by one, a new
+     * single cow appears, and mushrooms drop as usual.</p>
+     *
+     * <p><b>Why HEAD here, not RETURN like the sheep hook:</b> the sheep handler must wait for vanilla to
+     * roll the wool (its loot is gated on {@code sheared:false}) and the sheep survives the shear, so RETURN
+     * works. A mooshroom does NOT survive — by RETURN it has already been discarded and replaced by the cow,
+     * leaving nothing to decrement. And the mushroom loot is keyed off the mooshroom's red/brown VARIANT,
+     * which this handler never touches, so running at HEAD does not suppress or alter the drop. We do NOT
+     * cancel: vanilla still performs the conversion and the drop for the single unit we left behind.</p>
+     *
+     * <p><b>Why a merge-back guard IS needed</b> (just like the sheep/taming/breeding splits). For an
+     * instant {@code self} (count 1) and {@code remainder} (count-1) are co-located same-variant mooshrooms
+     * — a valid merge pair — and the {@code ENTITY_LOAD} fast-path merge runs <i>effectively synchronously</i>
+     * INSIDE {@code addFreshEntity} (the same hazard the breeding split hit). Without a guard it absorbs the
+     * leftover straight back into {@code self}, which becomes "Mooshroom x{count}" again; vanilla then
+     * converts that whole stack WHOLESALE into a single cow (the count attachment is not carried across the
+     * conversion), silently destroying the other {@code count-1} mooshrooms — confirmed by a headless test
+     * (shearing x5 yielded one cow and zero leftover mooshrooms). The original "type change is the guard"
+     * reasoning was wrong: the type only changes at vanilla's {@code convertTo}, which runs AFTER our HEAD
+     * injection returns — too late for the merge that already fired during {@code addFreshEntity}.</p>
+     *
+     * <p>The guard, mirroring taming ({@code setTame}) / breeding ({@code setInLove}): we mark {@code self}
+     * with a love timer BEFORE adding the leftover, so it fails {@link #canMerge} ({@code isInLove()}) and is
+     * not a merge target. Unlike {@code setInLove(Player)} this sets the timer WITHOUT broadcasting hearts,
+     * and {@code convertTo} copies only data components (not the love timer), so the cow comes out clean and
+     * the marker never surfaces (vanilla converts {@code self} this same tick).</p>
+     *
+     * <p>No mob is lost: {@code self(1 -> 1 cow) + remainder(count-1 mooshroom)} totals the original count.
+     * If the leftover can't be created/added we restore the original stack untouched and let vanilla
+     * convert the whole stack (the old behaviour) rather than risk losing mooshrooms.</p>
+     *
+     * @return {@code true} if a single was peeled off; {@code false} for a normal single or a
+     *         creation/spawn failure that left the stack intact.
+     */
+    public static boolean splitOffOneForMooshroomShearing(MushroomCow self) {
+        int count = getCount(self);
+        if (count <= 1) return false;                       // a normal single — vanilla converts it directly
+        if (!StackConfig.isMobStackingEnabled(self.getType())) return false;     // disabled type: don't split (see splitOneForBreeding)
+        if (!(self.level() instanceof ServerLevel level)) return false;
+
+        // Build the leftover herd first but DON'T add it yet, so a creation failure costs nothing.
+        Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
+        if (!(created instanceof MushroomCow remainder)) return false; // can't recreate — leave it as-is
+
+        // Clone self's look (red / brown mushroom variant) into the leftover. self has not been converted
+        // yet at this HEAD injection, so the clone is a same-variant, still-mooshroom herd.
         copyDataFrom(remainder, self, level);
         remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
-        setCount(remainder, count - 1);                     // the leftover flock, still fleeced
+        setCount(remainder, count - 1);                     // the surviving mooshroom stack
 
-        // CRITICAL ORDERING: mark 'self' sheared BEFORE the (still fleeced) leftover enters the world, so
-        // it is already in a different variant group and cannot be merged back (see method javadoc).
-        self.setSheared(true);
-        setCount(self, 1);                                  // 'self' is the one being sheared -> drop the "xN" name
+        // Reduce 'self' to a clean single BEFORE vanilla's convertTo runs, so the cow it spawns inherits
+        // neither the stack count nor the "xN" name (both of which convertTo would otherwise copy across).
+        setCount(self, 1);
+
+        // CRITICAL: make 'self' un-mergeable BEFORE the (still-mooshroom) leftover joins the world. The
+        // ENTITY_LOAD merge runs effectively synchronously inside addFreshEntity, so otherwise it absorbs
+        // the leftover right back into self -> "Mooshroom x{count}" -> vanilla converts the whole stack into
+        // a single cow and the other count-1 are lost (see method javadoc). A love timer fails canMerge()
+        // without broadcasting hearts; vanilla converts self to a cow this same tick and does not copy the
+        // timer across, so the cow is unaffected.
+        self.setInLoveTime(2);
 
         if (!level.addFreshEntity(remainder)) {
-            // Spawn rejected (rare): restore the original stack so no sheep is lost. Vanilla then shears
-            // the whole stack — the documented safe fallback.
-            self.setSheared(false);
+            // Spawn rejected (rare): restore the original stack so no mooshroom is lost. Vanilla then
+            // converts the whole stack — the documented safe fallback.
+            self.setInLoveTime(0);
             setCount(self, count);
             return false;
         }

@@ -1,9 +1,9 @@
 # Entity Stacker (Fabric · Minecraft 26.1.2)
 
-Merges identical nearby passive/hostile mobs into a single counted entity, shows the count above the
+Merges identical nearby passive mobs into a single counted entity, shows the count above the
 head (`Cow x5`), decrements (instead of one‑shotting the whole pile) on death with proper loot, unstacks one parent per
 successful breed while respecting the breeding cooldown, and hands out one pet per successful tame
-instead of taming the whole stack.
+instead of taming the whole stack. Hostile mobs are **not** stacked (toggle with `StackConfig.ALLOW_HOSTILE`).
 
 ## Toolchain (from <https://fabricmc.net/develop> + the official `fabric-example-mod`)
 
@@ -74,9 +74,47 @@ Then:
 | `BabyEntitySpawnEvent`      | `AnimalEntityBreedMixin` (hooks `Animal#setInLove`)     |
 | `LivingTickEvent` scan      | throttled `ServerTickEvents.END_LEVEL_TICK`             |
 
+## Configuring which mobs stack (in-game)
+
+Which mobs are allowed to stack is editable at runtime — no restart, no config-file editing required —
+and persisted to `config/entitystacker.json`. The first managed mobs are **cow, chicken, sheep, pig**
+(add more by appending to `StackConfig.MANAGED`).
+
+| Command | Effect |
+|---------|--------|
+| `/entitystacker` or `/entitystacker config` | Opens a clickable **settings GUI** (see below). Player-only. |
+| `/entitystacker list` | Prints each managed mob's current ON/OFF state. |
+| `/entitystacker set <mob> <true\|false>` | Toggles one mob from chat/console/command-block. |
+| `/estack …` | Short alias for all of the above. |
+
+All sub-commands require **op (command level 2)** — gated via 26.x's permission system
+(`source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER)`, the replacement for the removed
+`hasPermission(2)`).
+
+### The settings GUI is server-side (works on vanilla clients)
+
+`StackerConfigMenu` reuses the vanilla `MenuType.GENERIC_9x3` chest screen, so it renders on an
+**unmodified vanilla client** with no client mod and no custom packets — fitting this mod's server-side-only
+design. Each managed mob is a spawn egg you click to toggle: an **enchant glint + green `[ON]`** when
+stacking is enabled, **no glint + red `[OFF]`** when disabled. The menu is a read-only control panel — its
+`clicked(...)` override never calls vanilla's item-moving logic (so nothing can be taken or duped) and
+re-syncs the client after each click.
+
+> **26.x note:** `AbstractContainerMenu.clicked(...)` takes a `ContainerInput` (not the old `ClickType`).
+
+### Disabling a mob does not destroy existing stacks
+
+Turning a mob **off** stops *new* stacking (it fails `isStackable`/`canMerge`), and an already-existing
+stack of that mob is frozen rather than torn apart: it won't grow, and the breed/shear/tame split logic is
+short-circuited for disabled types, so it won't shed singles either (which couldn't re-merge anyway while
+the type is off). You can still whittle it down one unit at a time by killing it — death-decrement is
+intentionally toggle-agnostic, so nothing is ever lost or duplicated. (Mooshrooms are a separate
+`EntityType` from cows, so toggling **cow** doesn't affect them.)
+
 ## Tuning
 
-See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggles, blacklist).
+See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggles, blacklist, and the
+per-mob `MANAGED` toggles described above).
 
 ## Known limitations
 
@@ -95,6 +133,32 @@ See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggl
 ## Changelog
 
 Newest first. Dates are commit dates.
+
+### 2026-05-31 — Per-mob "which mobs stack" settings (GUI + command)
+
+- **Feature:** added in-game control over which mobs are allowed to stack, starting with **cow, chicken,
+  sheep, pig**. Exposed two ways: a clickable **server-side chest GUI** (`StackerConfigMenu`, opened with
+  `/entitystacker`) and a **command** (`/entitystacker list` / `set <mob> <bool>`, alias `/estack`). The
+  toggles are runtime state persisted to `config/entitystacker.json` and are consulted by `isStackable`
+  via the new `StackConfig.isMobStackingEnabled(type)`.
+- **Server-side-only, vanilla-client-friendly:** the GUI reuses the vanilla `MenuType.GENERIC_9x3` menu,
+  so it needs no client mod and no custom networking. It's a read-only control panel: `clicked(...)` never
+  invokes vanilla item movement (no dupes) and calls `sendAllDataToRemote()` to revert the client's
+  optimistic prediction after each toggle.
+- **26.x specifics confirmed against the real jars** (and why the old idioms don't compile):
+  `AbstractContainerMenu.clicked(...)` now takes `net.minecraft.world.inventory.ContainerInput` (not
+  `ClickType`); command permission level 2 is `source.permissions().hasPermission(Permissions
+  .COMMANDS_GAMEMASTER)` (the `CommandSourceStack.hasPermission(int)` method was removed in favour of the
+  new `PermissionSet` system).
+- **Non-destructive:** disabling a mob stops new merges but leaves existing stacks intact (they keep
+  decrementing correctly on death); they just don't grow.
+
+### 2026-05-31 — Stop stacking hostile mobs
+
+- **Change:** flipped `StackConfig.ALLOW_HOSTILE` to `false` so hostile mobs (every `Enemy` — zombies,
+  skeletons, spiders, creepers, …) no longer stack. `isCategoryAllowed` returns `false` for them, which
+  makes `isStackable`/`canMerge` reject them, so each wild hostile spawns, lives and dies individually.
+  Set the flag back to `true` to re-enable hostile stacking. Passive stacking is unchanged.
 
 ### 2026-05-31 — Fix taming a stacked animal taming the whole stack
 

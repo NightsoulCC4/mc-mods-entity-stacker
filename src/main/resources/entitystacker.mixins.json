@@ -5,6 +5,7 @@
   "mixins": [
     "AnimalEntityBreedMixin",
     "LivingEntityInvoker",
+    "MushroomCowShearMixin",
     "SheepShearMixin",
     "TamableAnimalTameMixin",
     "WolfVariantInvoker"
