@@ -4,19 +4,25 @@ import com.example.entitystacker.mixin.LivingEntityInvoker;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.Leashable;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.animal.feline.Cat;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.storage.TagValueInput;
+import net.minecraft.world.level.storage.TagValueOutput;
 import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
@@ -24,6 +30,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * All Entity Stacker gameplay logic and event wiring (Minecraft 26.1.2 / Mojang mappings).
@@ -147,6 +154,46 @@ public final class StackEventHandler {
             if (animal.getAge() != 0) return false;    // <0 = baby, >0 = breeding cooldown
         }
         return true;
+    }
+
+    /**
+     * Make {@code target} a clean, INDEPENDENT copy of {@code source}'s appearance.
+     *
+     * <p>26.x gives many mobs a biome-driven VARIANT (cow, pig, chicken, wolf, …). A brand-new entity
+     * from {@code EntityType#create} always carries the type DEFAULT variant, so a naively split-off
+     * unit loses the look of the stack it came from. Rather than poke each mob's variant setter (several
+     * are {@code private}: Pig/Wolf/Cat/Parrot), we round-trip the source through its own NBT: the
+     * variant is part of the saved data, so this copies it for EVERY variant-bearing type at once
+     * (and brings along colour, attributes, etc.).</p>
+     *
+     * <p>The round-trip also drags along state that belongs to the <i>individual</i> source, not to a
+     * fresh split-off unit, so we scrub it afterwards to leave a clean baseline:
+     * <ul>
+     *   <li>a fresh UUID — reusing the source's would make the game treat them as the same entity and
+     *       discard one;</li>
+     *   <li>full health — otherwise a damaged stack would spawn damaged split units;</li>
+     *   <li>no leash / passengers — a split unit must not share the source's lead or riders (a shared
+     *       lead would also dupe the item); {@code removeLeash()} clears the link without dropping one;</li>
+     *   <li>adult age and no love timer — a split unit is a fresh, mergeable adult; the breeding caller
+     *       re-applies love itself.</li>
+     * </ul>
+     * {@code source} is not modified. Callers still set the stack count, name and position.</p>
+     */
+    private static void copyDataFrom(Mob target, Mob source, ServerLevel level) {
+        TagValueOutput out = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, level.registryAccess());
+        source.saveWithoutId(out);
+        CompoundTag data = out.buildResult();
+        target.load(TagValueInput.create(ProblemReporter.DISCARDING, level.registryAccess(), data));
+
+        // Scrub per-individual / relational state so the copy is a clean, independent unit.
+        target.setUUID(UUID.randomUUID());
+        target.setHealth(target.getMaxHealth());
+        target.ejectPassengers();
+        if (target instanceof Leashable leashable && leashable.isLeashed()) {
+            leashable.removeLeash();                        // clear the inherited lead WITHOUT dropping one
+        }
+        if (target instanceof AgeableMob ageable) ageable.setAge(0);       // fresh adult, not a baby/cooldown
+        if (target instanceof Animal animal) animal.setInLoveTime(0);      // no inherited love timer
     }
 
     /** Two mobs may merge only if they are the exact same type. */
@@ -358,6 +405,11 @@ public final class StackEventHandler {
             return false;                                   // couldn't create — leave the stack intact
         }
 
+        // Inherit the stack's appearance (biome variant, colour, …) so the split-off breeder looks like
+        // its herd instead of reverting to the default variant. Clone before we touch counts/name/love;
+        // the helper hands the copy a fresh UUID.
+        copyDataFrom(partner, self, level);
+        setCount(partner, 1);                               // a clean single — clear any cloned count/name
         partner.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
         partner.setAge(0);                                  // adult, ready to breed
 
@@ -431,7 +483,21 @@ public final class StackEventHandler {
         // Build the leftover herd first but DON'T add it yet, so a creation failure costs nothing.
         Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
         if (!(created instanceof Mob remainder)) return null; // can't recreate the herd — leave the stack as-is
-        remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+
+        // Give the leftover herd the right look.
+        //   - Cats: their variant is NOT biome-driven, so per request the leftover rolls a fresh RANDOM
+        //     variant via finalizeSpawn (the same way a wild cat picks its look on spawn).
+        //   - Everything else (wolf is the biome-variant case; a parrot's colour is not biome-driven but
+        //     is still saved data): we clone self's data, which carries whatever variant the original had
+        //     through serialization. self is still untamed here, so the clone is untamed too.
+        if (remainder instanceof Cat) {
+            remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+            remainder.finalizeSpawn(level, level.getCurrentDifficultyAt(remainder.blockPosition()),
+                    EntitySpawnReason.CONVERSION, null);
+        } else {
+            copyDataFrom(remainder, self, level);
+            remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        }
         setCount(remainder, count - 1);                     // the leftover wild herd, still untamed
 
         // CRITICAL ORDERING: tame 'self' BEFORE the (still untamed) leftover enters the world.
