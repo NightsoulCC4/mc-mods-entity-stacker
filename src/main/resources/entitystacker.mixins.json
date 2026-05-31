@@ -6,6 +6,7 @@
     "AnimalEntityBreedMixin",
     "LivingEntityInvoker",
     "MushroomCowShearMixin",
+    "SheepDyeMixin",
     "SheepShearMixin",
     "TamableAnimalTameMixin",
     "WolfVariantInvoker"

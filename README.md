@@ -82,25 +82,13 @@ and persisted to `config/entitystacker.json`. The first managed mobs are **cow, 
 
 | Command | Effect |
 |---------|--------|
-| `/entitystacker` or `/entitystacker config` | Opens a clickable **settings GUI** (see below). Player-only. |
-| `/entitystacker list` | Prints each managed mob's current ON/OFF state. |
-| `/entitystacker set <mob> <true\|false>` | Toggles one mob from chat/console/command-block. |
-| `/estack …` | Short alias for all of the above. |
+| `/entitystacker` or `/entitystacker list` | Prints each managed mob's current ON/OFF state. |
+| `/entitystacker set <mob> <true\|false>` | Turns one mob's stacking on/off (chat / console / command-block). |
+| `/estack …` | Short alias for the above. |
 
 All sub-commands require **op (command level 2)** — gated via 26.x's permission system
 (`source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER)`, the replacement for the removed
-`hasPermission(2)`).
-
-### The settings GUI is server-side (works on vanilla clients)
-
-`StackerConfigMenu` reuses the vanilla `MenuType.GENERIC_9x3` chest screen, so it renders on an
-**unmodified vanilla client** with no client mod and no custom packets — fitting this mod's server-side-only
-design. Each managed mob is a spawn egg you click to toggle: an **enchant glint + green `[ON]`** when
-stacking is enabled, **no glint + red `[OFF]`** when disabled. The menu is a read-only control panel — its
-`clicked(...)` override never calls vanilla's item-moving logic (so nothing can be taken or duped) and
-re-syncs the client after each click.
-
-> **26.x note:** `AbstractContainerMenu.clicked(...)` takes a `ContainerInput` (not the old `ClickType`).
+`hasPermission(2)`). The command is fully server-side; no client mod is required.
 
 ### Disabling a mob does not destroy existing stacks
 
@@ -134,24 +122,21 @@ per-mob `MANAGED` toggles described above).
 
 Newest first. Dates are commit dates.
 
-### 2026-05-31 — Per-mob "which mobs stack" settings (GUI + command)
+### 2026-05-31 — Per-mob "which mobs stack" command
 
 - **Feature:** added in-game control over which mobs are allowed to stack, starting with **cow, chicken,
-  sheep, pig**. Exposed two ways: a clickable **server-side chest GUI** (`StackerConfigMenu`, opened with
-  `/entitystacker`) and a **command** (`/entitystacker list` / `set <mob> <bool>`, alias `/estack`). The
-  toggles are runtime state persisted to `config/entitystacker.json` and are consulted by `isStackable`
-  via the new `StackConfig.isMobStackingEnabled(type)`.
-- **Server-side-only, vanilla-client-friendly:** the GUI reuses the vanilla `MenuType.GENERIC_9x3` menu,
-  so it needs no client mod and no custom networking. It's a read-only control panel: `clicked(...)` never
-  invokes vanilla item movement (no dupes) and calls `sendAllDataToRemote()` to revert the client's
-  optimistic prediction after each toggle.
-- **26.x specifics confirmed against the real jars** (and why the old idioms don't compile):
-  `AbstractContainerMenu.clicked(...)` now takes `net.minecraft.world.inventory.ContainerInput` (not
-  `ClickType`); command permission level 2 is `source.permissions().hasPermission(Permissions
-  .COMMANDS_GAMEMASTER)` (the `CommandSourceStack.hasPermission(int)` method was removed in favour of the
-  new `PermissionSet` system).
-- **Non-destructive:** disabling a mob stops new merges but leaves existing stacks intact (they keep
-  decrementing correctly on death); they just don't grow.
+  sheep, pig**, via the `/entitystacker` command (`list` / `set <mob> <true|false>`, alias `/estack`). The
+  toggles are runtime state persisted atomically to `config/entitystacker.json` and consulted by
+  `isStackable` through the new `StackConfig.isMobStackingEnabled(type)`. Fully server-side; no client mod.
+- **26.x permission specifics** (the old idiom doesn't compile): command level 2 is
+  `source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER)` — `CommandSourceStack
+  .hasPermission(int)` was removed in favour of the new `PermissionSet` system.
+- **Non-destructive when disabling a mob:** new stacking stops, and the breed/shear/tame split helpers
+  short-circuit for disabled types so an existing stack neither grows nor erodes into un-mergeable singles.
+  Death-decrement stays toggle-agnostic, so a disabled stack can still be whittled down one unit at a time
+  with nothing lost or duplicated.
+- **Note:** an earlier draft of this feature included a clickable server-side chest GUI; it was removed in
+  favour of the command-only interface.
 
 ### 2026-05-31 — Stop stacking hostile mobs
 

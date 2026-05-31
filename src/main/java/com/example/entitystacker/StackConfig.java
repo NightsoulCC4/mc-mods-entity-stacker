@@ -9,8 +9,6 @@ import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.monster.Enemy;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.item.Items;
 
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -26,10 +24,9 @@ import java.util.Set;
  * Central, tweakable configuration for the stacker (Mojang mappings).
  *
  * <p>The radius / interval / cap constants stay compile-time. The <b>per-mob "is this type allowed to
- * stack" toggles</b> ({@link #MANAGED}) are RUNTIME state, editable in-game via {@code /entitystacker}
- * (a clickable chest GUI or the {@code set} sub-command) and persisted to
- * {@code config/entitystacker.json}. The gameplay code only ever reads through this class, so the
- * storage details stay localized here.</p>
+ * stack" toggles</b> ({@link #MANAGED}) are RUNTIME state, editable in-game via the
+ * {@code /entitystacker} command and persisted to {@code config/entitystacker.json}. The gameplay code
+ * only ever reads through this class, so the storage details stay localized here.</p>
  */
 public final class StackConfig {
 
@@ -74,22 +71,20 @@ public final class StackConfig {
     /* ====================================================================== */
 
     /**
-     * A mob the player can switch on/off in the settings GUI. {@code label} is the short id used by the
-     * {@code /entitystacker set <label>} command and is the type's registry path; {@code icon} is the
-     * item shown for it in the chest GUI.
+     * A mob the player can switch on/off. {@code label} is the short id used by the
+     * {@code /entitystacker set <label>} command and is the type's registry path.
      */
-    public record ManagedMob(EntityType<?> type, String label, Item icon) {}
+    public record ManagedMob(EntityType<?> type, String label) {}
 
     /**
-     * The configurable mob list, in display order. Starts with cow, chicken, sheep, pig — add a row here
-     * to expose another mob (the GUI and command pick it up automatically; the GUI currently has room for
-     * up to its {@link StackerConfigMenu#MOB_SLOTS} slots).
+     * The configurable mob list, in command order. Starts with cow, chicken, sheep, pig — add a row here
+     * to expose another mob (the command picks it up automatically).
      */
     public static final List<ManagedMob> MANAGED = List.of(
-            new ManagedMob(EntityType.COW, "cow", Items.COW_SPAWN_EGG),
-            new ManagedMob(EntityType.CHICKEN, "chicken", Items.CHICKEN_SPAWN_EGG),
-            new ManagedMob(EntityType.SHEEP, "sheep", Items.SHEEP_SPAWN_EGG),
-            new ManagedMob(EntityType.PIG, "pig", Items.PIG_SPAWN_EGG)
+            new ManagedMob(EntityType.COW, "cow"),
+            new ManagedMob(EntityType.CHICKEN, "chicken"),
+            new ManagedMob(EntityType.SHEEP, "sheep"),
+            new ManagedMob(EntityType.PIG, "pig")
     );
 
     /** Live enabled/disabled state per managed type. Default: every managed mob stacks. */

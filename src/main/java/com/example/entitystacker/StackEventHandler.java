@@ -30,6 +30,7 @@ import net.minecraft.world.entity.animal.pig.Pig;
 import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.TagValueOutput;
 import net.minecraft.world.phys.AABB;
@@ -89,6 +90,7 @@ public final class StackEventHandler {
         // (5) Taming is driven by TamableAnimalTameMixin, which calls splitOffRemainderBeforeTame(...).
         // (6) Sheep shearing is driven by SheepShearMixin, which calls splitOffOneForShearing(...).
         // (7) Mooshroom shearing is driven by MushroomCowShearMixin, which calls splitOffOneForMooshroomShearing(...).
+        // (8) Sheep dyeing is driven by SheepDyeMixin, which calls splitOneForDyeing(...).
     }
 
     /* ====================================================================== */
@@ -737,6 +739,72 @@ public final class StackEventHandler {
             // Spawn rejected (rare): restore the original stack so no mooshroom is lost. Vanilla then
             // converts the whole stack — the documented safe fallback.
             self.setInLoveTime(0);
+            setCount(self, count);
+            return false;
+        }
+
+        return true;
+    }
+
+    /* ====================================================================== */
+    /* (8) Dyeing a sheep — peel one off and recolour only that one             */
+    /* ====================================================================== */
+
+    /**
+     * Called from {@link com.example.entitystacker.mixin.SheepDyeMixin} from within
+     * {@code DyeItem#interactLivingEntity(...)}, right BEFORE vanilla's {@code Sheep#setColor(dye)} call.
+     *
+     * <p><b>The bug:</b> a stack is a SINGLE entity, so dyeing "Sheep x5" recolours the whole stack at
+     * once. Instead we peel the leftover {@code (count - 1)} off keeping the ORIGINAL colour, leave the
+     * interacted sheep as the single one that takes the new colour.</p>
+     *
+     * <p><b>Timing.</b> The mixin fires after vanilla has already cleared its own guards (server side, the
+     * sheep is alive + un-sheared, and {@code getColor() != newColor}), so we always genuinely change the
+     * colour. At this instant {@code self} still wears its ORIGINAL colour — vanilla's {@code setColor}
+     * runs immediately after we return — so cloning {@code self} gives the leftover the original colour.</p>
+     *
+     * <p><b>Merge-back, for free.</b> We pre-apply the NEW colour to {@code self} BEFORE the (original
+     * colour) leftover joins the world. That puts the two in different {@link #variantKey} groups, so the
+     * ENTITY_LOAD merge — which runs effectively synchronously inside {@code addFreshEntity} (see the
+     * breeding/taming/mooshroom splits) — cannot fuse them back. Vanilla's own {@code setColor(newColor)}
+     * then runs as a harmless no-op and still consumes the dye (the dye {@code shrink} is not re-gated on
+     * the colour). No extra disqualifier is needed: the new colour is itself the guard.</p>
+     *
+     * <p>No sheep is lost: {@code self(1, newColour) + remainder(count-1, oldColour)} totals the original
+     * count, and the two never re-merge (different colours) until something dyes them alike again.</p>
+     *
+     * <p>If the leftover can't be created/added we restore the original count; vanilla then dyes the whole
+     * stack (the old behaviour) — a rare, mob-safe fallback. For a normal single (count == 1) we do
+     * nothing and vanilla recolours it directly.</p>
+     *
+     * @return {@code true} if a single was peeled off; {@code false} for a normal single, a disabled type,
+     *         or a creation/spawn failure that left the stack intact.
+     */
+    public static boolean splitOneForDyeing(Sheep self, DyeColor newColor) {
+        int count = getCount(self);
+        if (count <= 1) return false;                       // a normal single — vanilla recolours it directly
+        if (!StackConfig.isMobStackingEnabled(self.getType())) return false;     // disabled type: don't split
+        if (!(self.level() instanceof ServerLevel level)) return false;
+
+        // Build the leftover flock first but DON'T add it yet, so a creation failure costs nothing.
+        Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
+        if (!(created instanceof Sheep remainder)) return false; // can't recreate the flock — leave it as-is
+
+        // self still wears its ORIGINAL colour here (vanilla's setColor runs right after we return), so the
+        // clone carries the original colour for the leftover flock.
+        copyDataFrom(remainder, self, level);
+        remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        setCount(remainder, count - 1);                     // the leftover flock, original colour
+
+        // Pre-apply the NEW colour to self BEFORE the leftover joins the world: it then sits in a different
+        // variant group than the (original-colour) leftover and cannot be merged back. Vanilla's own
+        // setColor(newColor) runs immediately after as a no-op and still consumes the dye.
+        self.setColor(newColor);
+        setCount(self, 1);                                  // 'self' is the recoloured single -> drop the "xN" name
+
+        if (!level.addFreshEntity(remainder)) {
+            // Spawn rejected (rare): restore the original count so no sheep is lost. Vanilla then recolours
+            // the whole stack — the documented safe fallback.
             setCount(self, count);
             return false;
         }
