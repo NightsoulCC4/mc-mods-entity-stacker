@@ -85,7 +85,9 @@ public final class StackEventHandler {
         // (3) Combat: intercept the death of stacked entities so we can decrement instead.
         ServerLivingEntityEvents.ALLOW_DEATH.register(StackEventHandler::onAllowDeath);
 
-        // (4) Breeding is driven by AnimalEntityBreedMixin, which calls onBreed(...).
+        // (4) Breeding is driven by AnimalEntityBreedMixin, which calls splitOneForBreeding(...).
+        // (5) Taming is driven by TamableAnimalTameMixin, which calls splitOffRemainderBeforeTame(...).
+        // (6) Shearing is driven by SheepShearMixin, which calls splitOffOneForShearing(...).
     }
 
     /* ====================================================================== */
@@ -227,7 +229,9 @@ public final class StackEventHandler {
      * other type here has a public getter.
      */
     private static String variantKey(Mob m) {
-        if (m instanceof Sheep s) return "sheep:" + s.getColor();                 // wool colour
+        // Wool colour AND sheared state: a freshly-sheared sheep must NOT stack back into a fleeced flock
+        // (that would undo the shear split and let the stack be re-sheared). It rejoins once it regrows.
+        if (m instanceof Sheep s) return "sheep:" + s.getColor() + (s.isSheared() ? ":sheared" : "");
         if (m instanceof MushroomCow mc) return "mooshroom:" + mc.getVariant();   // red / brown
         if (m instanceof Cow c) return holderKey(c.getVariant());
         if (m instanceof Pig p) return holderKey(p.getVariant());
@@ -569,5 +573,72 @@ public final class StackEventHandler {
         }
 
         return remainder;
+    }
+
+    /* ====================================================================== */
+    /* (6) Shearing — peel one sheep off a stack so it can be sheared          */
+    /* ====================================================================== */
+
+    /**
+     * Called from {@link com.example.entitystacker.mixin.SheepShearMixin} at the HEAD of
+     * {@code Sheep#shear(...)} (fired when a sheep is sheared — by a player or a dispenser).
+     *
+     * <p>A stack is a SINGLE entity, so shearing "Sheep x5" would otherwise drop just one fleece while
+     * the count stayed at 5 and no sheep ever split off — the reported bug. Instead we keep the
+     * interacted sheep AS the single one that gets sheared (count 1) and spawn the leftover
+     * {@code (count - 1)} beside it as a separate UNSHEARED flock. Vanilla's own {@code shear} body —
+     * which called us — then runs on this one sheep and drops its wool normally.</p>
+     *
+     * <p>The leftover flock is cloned from {@code self} <i>before</i> vanilla shears it, so it carries
+     * {@code self}'s wool colour and is itself unsheared (it still has its fleece). We never cancel, so
+     * exactly one fleece drops — for the single unit we left behind.</p>
+     *
+     * <p><b>Ordering matters.</b> We mark {@code self} as sheared BEFORE the leftover joins the world.
+     * The two are co-located same-colour sheep, and a sheared sheep has a different {@link #variantKey}
+     * from an unsheared one, so marking {@code self} sheared first makes it un-mergeable with the
+     * still-fleeced leftover — otherwise the merge pass (which runs effectively synchronously on the
+     * server thread; see the breeding/taming splits, which hit the identical hazard) could fuse them
+     * straight back into one stack. Vanilla's {@code shear} body then re-sets sheared (idempotent) and
+     * drops the wool.</p>
+     *
+     * <p>No sheep is lost: {@code self(1, sheared) + remainder(count-1, fleeced)} totals the original
+     * count. The sheared single re-merges with the flock once it eats grass and regrows its wool (its
+     * variant key flips back), so the stack heals itself naturally — no special-casing.</p>
+     *
+     * <p>If the leftover can't be created/added we restore the original stack untouched; vanilla then
+     * shears the whole stack (one fleece, the old behaviour) rather than risk losing sheep.</p>
+     *
+     * @return {@code true} if a single was peeled off; {@code false} for a normal single or a
+     *         creation/spawn failure that left the stack intact.
+     */
+    public static boolean splitOffOneForShearing(Sheep self) {
+        int count = getCount(self);
+        if (count <= 1) return false;                       // a normal single — vanilla shears it directly
+        if (!(self.level() instanceof ServerLevel level)) return false;
+
+        // Build the leftover flock first but DON'T add it yet, so a creation failure costs nothing.
+        Entity created = self.getType().create(level, EntitySpawnReason.CONVERSION);
+        if (!(created instanceof Sheep remainder)) return false; // can't recreate the flock — leave it as-is
+
+        // Clone self's look (wool colour) into the leftover. self is still UNSHEARED at this HEAD
+        // injection, so the clone is an unsheared, same-colour flock that keeps its fleece.
+        copyDataFrom(remainder, self, level);
+        remainder.snapTo(self.getX(), self.getY(), self.getZ(), self.getYRot(), self.getXRot());
+        setCount(remainder, count - 1);                     // the leftover flock, still fleeced
+
+        // CRITICAL ORDERING: mark 'self' sheared BEFORE the (still fleeced) leftover enters the world, so
+        // it is already in a different variant group and cannot be merged back (see method javadoc).
+        self.setSheared(true);
+        setCount(self, 1);                                  // 'self' is the one being sheared -> drop the "xN" name
+
+        if (!level.addFreshEntity(remainder)) {
+            // Spawn rejected (rare): restore the original stack so no sheep is lost. Vanilla then shears
+            // the whole stack — the documented safe fallback.
+            self.setSheared(false);
+            setCount(self, count);
+            return false;
+        }
+
+        return true;
     }
 }
