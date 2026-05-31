@@ -27,3 +27,8 @@ bin/
 # OS
 .DS_Store
 Thumbs.db
+
+# Modrinth publishing drafts / landing page (not part of the mod)
+CHANGELOG-modrinth.md
+DESCRIPTION-modrinth.md
+index.html
