@@ -8,6 +8,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.animal.equine.AbstractHorse;
 import net.minecraft.world.entity.monster.Enemy;
 
 import java.io.IOException;
@@ -54,6 +55,20 @@ public final class StackConfig {
      */
     public static final boolean ALLOW_PASSIVE = true;
     public static final boolean ALLOW_HOSTILE = false;
+
+    /**
+     * Master toggle for <b>mounts</b> — every {@link net.minecraft.world.entity.animal.equine.AbstractHorse}
+     * (horse, donkey, mule, llama, trader-llama, camel, plus skeleton/zombie horse). It is {@code false}
+     * (the default): mounts are opted out of stacking.
+     *
+     * <p>Unlike a cow or a chicken, each of these mobs rolls its own individual <b>speed</b>,
+     * <b>jump-strength</b> and <b>max-health</b> attributes on spawn, so two same-type horses are almost
+     * never truly interchangeable. The merge is variant-blind AND stat-blind — {@code copyDataFrom} even
+     * resets HP to full and re-rolls nothing — so stacking them would silently collapse those distinct
+     * stat-lines into whichever single survivor the merge happened to keep, destroying the rest. Set this
+     * to {@code true} only if you don't care about preserving per-mount attributes.</p>
+     */
+    public static final boolean ALLOW_MOUNTS = false;
 
     /** Entity types that must never be stacked: bosses, mobs with unique data, etc. */
     public static final Set<EntityType<?>> BLACKLIST = Set.of(
@@ -201,6 +216,10 @@ public final class StackConfig {
      * {@code Enemy} is Mojmap's marker interface for hostile mobs (Yarn's {@code Monster}).
      */
     public static boolean isCategoryAllowed(Mob mob) {
+        // Mounts first: an AbstractHorse is ALSO an AgeableMob (it extends Animal), so this carve-out has
+        // to come before the passive branch or it would never be reached. Each mount carries its own
+        // randomised speed/jump/health, which the stat-blind merge would average away — see ALLOW_MOUNTS.
+        if (mob instanceof AbstractHorse) return ALLOW_MOUNTS;
         if (mob instanceof Enemy) return ALLOW_HOSTILE;
         if (mob instanceof AgeableMob) return ALLOW_PASSIVE;
         // Ambient/water/other mobs: treat like passives.

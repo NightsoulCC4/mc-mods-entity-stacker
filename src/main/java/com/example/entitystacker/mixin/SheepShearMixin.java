@@ -26,8 +26,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * {@code setSheared(true)}. Injecting at HEAD and marking the sheep sheared early (to stop the leftover
  * merging back) therefore suppressed the drop entirely. Injecting at RETURN lets vanilla drop the wool
  * and set {@code sheared} first; {@link StackEventHandler#splitOffOneForShearing} then peels off the
- * still-fleeced leftover, and because the interacted sheep is ALREADY sheared by then it sits in a
- * different variant group (see {@code variantKey}) and cannot merge back. We do NOT cancel.</p>
+ * still-fleeced leftover, and because the interacted sheep is ALREADY sheared by then it fails
+ * {@code isStackable} (sheared sheep never stack) and cannot merge back. We do NOT cancel.</p>
  *
  * <p>For a normal single (count == 1) the handler does nothing and vanilla's shear stands as-is.</p>
  *

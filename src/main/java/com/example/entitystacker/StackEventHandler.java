@@ -146,6 +146,7 @@ public final class StackEventHandler {
         if (mob.isLeashed()) return false;
         if (mob instanceof AgeableMob age && age.isBaby()) return false;         // never stack babies
         if (mob instanceof TamableAnimal tame && tame.isTame()) return false;    // never stack pets
+        if (mob instanceof Sheep sheep && sheep.isSheared()) return false;       // a shorn sheep waits to regrow its wool (eat grass) before rejoining
         if (!StackConfig.isTypeAllowed(mob.getType())) return false;
         if (!StackConfig.isMobStackingEnabled(mob.getType())) return false;      // player toggle (GUI/command)
         if (!StackConfig.isCategoryAllowed(mob)) return false;
@@ -233,9 +234,10 @@ public final class StackEventHandler {
      * other type here has a public getter.
      */
     private static String variantKey(Mob m) {
-        // Wool colour AND sheared state: a freshly-sheared sheep must NOT stack back into a fleeced flock
-        // (that would undo the shear split and let the stack be re-sheared). It rejoins once it regrows.
-        if (m instanceof Sheep s) return "sheep:" + s.getColor() + (s.isSheared() ? ":sheared" : "");
+        // Wool COLOUR keys the flock. Sheared sheep don't stack at all (isStackable rejects them), so a
+        // shorn sheep is never a merge candidate here; it simply rejoins its colour group once it eats
+        // grass and regrows its wool.
+        if (m instanceof Sheep s) return "sheep:" + s.getColor();
         if (m instanceof MushroomCow mc) return "mooshroom:" + mc.getVariant();   // red / brown
         if (m instanceof Cow c) return holderKey(c.getVariant());
         if (m instanceof Pig p) return holderKey(p.getVariant());
@@ -605,15 +607,15 @@ public final class StackEventHandler {
      * clone's sheared flag, because the leftover represents the {@code (count-1)} sheep that were NOT
      * sheared and still carry their wool. Exactly one fleece dropped — for the single unit we kept.</p>
      *
-     * <p><b>No merge-back, for free.</b> {@code self} is ALREADY sheared when we add the fleeced
-     * leftover, so the two sit in different {@link #variantKey} groups ("…:sheared" vs not) and the
-     * merge pass — which can run effectively synchronously on the server thread (see the breeding/taming
-     * splits, which had to pre-empt the identical hazard) — cannot fuse them. No pre-emptive marking is
+     * <p><b>No merge-back, for free.</b> {@code self} is ALREADY sheared when we add the fleeced leftover,
+     * and a shorn sheep fails {@link #isStackable} (sheared sheep never stack), so the merge pass — which
+     * can run effectively synchronously on the server thread (see the breeding/taming splits, which had to
+     * pre-empt the identical hazard) — cannot fuse the leftover back into it. No pre-emptive marking is
      * needed: vanilla's own {@code setSheared(true)} already did it.</p>
      *
      * <p>No sheep is lost: {@code self(1, sheared) + remainder(count-1, fleeced)} totals the original
-     * count. The sheared single re-merges with the flock once it eats grass and regrows its wool (its
-     * variant key flips back), so the stack heals itself naturally — no special-casing.</p>
+     * count. The sheared single becomes stackable again once it eats grass and regrows its wool, at which
+     * point it re-merges with the flock on the next sweep — the stack heals itself naturally, no special-casing.</p>
      *
      * <p>If the leftover can't be created/added we restore the original count; vanilla's single fleece
      * still dropped, so at worst the whole stack reads as sheared (a rare, cosmetic-only fallback) rather
@@ -641,8 +643,8 @@ public final class StackEventHandler {
 
         setCount(self, 1);                                  // 'self' is the one that was sheared -> drop the "xN" name
 
-        // self is already sheared (vanilla did it), so it is in a different variant group from the fleeced
-        // leftover and cannot merge back even if the merge runs synchronously inside addFreshEntity.
+        // self is already sheared (vanilla did it), so it fails isStackable() (a shorn sheep never stacks)
+        // and cannot merge back even if the merge runs synchronously inside addFreshEntity.
         if (!level.addFreshEntity(remainder)) {
             // Spawn rejected (rare): restore the original count so no sheep is lost. The single fleece
             // vanilla dropped stands; the stack just reads as sheared — a cosmetic-only safe fallback.

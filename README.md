@@ -3,7 +3,9 @@
 Merges identical nearby passive mobs into a single counted entity, shows the count above the
 head (`Cow x5`), decrements (instead of one‑shotting the whole pile) on death with proper loot, unstacks one parent per
 successful breed while respecting the breeding cooldown, and hands out one pet per successful tame
-instead of taming the whole stack. Hostile mobs are **not** stacked (toggle with `StackConfig.ALLOW_HOSTILE`).
+instead of taming the whole stack. Hostile mobs are **not** stacked (toggle with `StackConfig.ALLOW_HOSTILE`),
+and **mounts** — horses, donkeys, mules, llamas, camels (every `AbstractHorse`) — are **not** stacked either
+because each carries its own speed/jump/health (toggle with `StackConfig.ALLOW_MOUNTS`).
 
 ## Toolchain (from <https://fabricmc.net/develop> + the official `fabric-example-mod`)
 
@@ -101,7 +103,7 @@ intentionally toggle-agnostic, so nothing is ever lost or duplicated. (Mooshroom
 
 ## Tuning
 
-See `StackConfig` (radius, sweep interval, max stack size, passive/hostile toggles, blacklist, and the
+See `StackConfig` (radius, sweep interval, max stack size, passive/hostile/mount toggles, blacklist, and the
 per-mob `MANAGED` toggles described above).
 
 ## Known limitations
@@ -121,6 +123,40 @@ per-mob `MANAGED` toggles described above).
 ## Changelog
 
 Newest first. Dates are commit dates.
+
+### 2026-06-01 — Don't stack shorn sheep (rejoin after wool regrows)
+
+- **Change:** a freshly-sheared sheep no longer stacks at all. Previously `variantKey` keyed sheep by
+  colour **and** sheared state (`"sheep:WHITE:sheared"`), so shorn sheep still merged into their own
+  separate sheared group. Now `isStackable` rejects any `Sheep` whose `isSheared()` is true (alongside the
+  baby/tamed/leashed gates), so a shorn sheep stands alone.
+- **Self-healing rejoin:** the gate is read live, so the moment a shorn sheep eats grass and regrows its
+  wool (`isSheared()` flips back to `false`) it becomes stackable again and re-merges with its colour flock
+  on the next sweep — no timers, no special-casing.
+- **Cleanup:** dropped the now-dead `":sheared"` suffix from `variantKey` (a shorn sheep can never be a
+  merge candidate, so it's never grouped) and updated the shear-split merge-back reasoning in
+  `splitOffOneForShearing` / `SheepShearMixin`: the just-sheared single can't merge back because it now
+  fails `isStackable`, not because it sits in a different variant group.
+
+### 2026-06-01 — Stop stacking mounts (horses, llamas, camels)
+
+- **Bug:** mounts were stacking like farm animals, silently destroying per-individual stats. Every
+  `AbstractHorse` (horse, donkey, mule, llama, trader-llama, camel, plus skeleton/zombie horse) rolls its
+  own **speed**, **jump-strength** and **max-health** on spawn, but the merge is variant- *and* stat-blind
+  (`copyDataFrom` round-trips NBT and resets HP to full), so merging two horses collapsed their distinct
+  stat-lines into whichever survivor the sweep kept — the rest were lost.
+- **Fix:** added `StackConfig.ALLOW_MOUNTS` (default `false`) and a single `mob instanceof AbstractHorse`
+  carve-out at the **top** of `isCategoryAllowed` — before the `AgeableMob`/passive branch, since an
+  `AbstractHorse extends Animal extends AgeableMob` would otherwise be waved through as a passive. One
+  `instanceof` covers the whole family (verified against the 26.1.2 jar: `Donkey`/`Mule`/`Llama` →
+  `AbstractChestedHorse`, `TraderLlama` → `Llama`, `Camel`/`SkeletonHorse`/`ZombieHorse` → `AbstractHorse`),
+  so there is no `EntityType` enumeration to keep in sync. Flip `ALLOW_MOUNTS` to `true` to re-enable.
+- **26.x mapping note:** the family lives in `net.minecraft.world.entity.animal.equine` (Mojmap renamed the
+  old `animal.horse` package to `animal.equine`); `Camel` sits in `animal.camel` but still extends
+  `equine.AbstractHorse`.
+- **Pre-existing stacks:** stats of horses already absorbed *before* this fix are unrecoverable (the
+  absorbed entities were `discard()`ed on merge). A surviving `Horse xN` stack simply stops growing/merging;
+  whittle it down by killing one unit at a time (death-decrement is unaffected by this gate).
 
 ### 2026-05-31 — Per-mob "which mobs stack" command
 
